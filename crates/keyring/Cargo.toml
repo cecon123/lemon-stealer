@@ -1,0 +1,17 @@
+[package]
+name = "keyring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hbd_core = { path = "../core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+serde_json = { workspace = true }
