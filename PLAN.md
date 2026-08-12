@@ -115,13 +115,14 @@ Chỉ còn engine Chromium (kể cả Yandex/Opera variants — cùng code path,
 - [x] GitHub Actions: `cargo build --all-targets`, `cargo test`, clippy (chạy trên `windows-latest` runner)
 - [x] **Trial run** (R0): port `types/category.go` + `crypto/version.go` + decrypt GCM/CBC/kEmptyKey/PBKDF2 với adversarial review (R10) — reviewer subagent bị lỗi infra ("no such column: replacement_seq") → review thủ công: test vector Go được pin trong test (CBC 19381468…, GCM 6c49dac8…, kEmptyKey d0d0ec9c…, RFC6070 ea6c014d…)
 
-### Phase 1 — Crypto core (pure Rust, không unsafe)
-- [ ] `DetectVersion` (prefix 3B: `v10/v11/v12/v20`, ngược lại → DPAPI pre-80; `strip_prefix`)
-- [ ] `decrypt_chromium_gcm` (AES-256-GCM: 3B prefix + nonce 12B + ct+tag; bounds check `<3+12` → Err)
-- [ ] `decrypt_chromium_cbc` (AES-128-CBC, IV cố định 0x20×16, PKCS5/7; **kEmptyKey fallback**: PBKDF2("", "saltysalt", 1, 16, SHA1) — retry khi KWallet race crbug.com/40055416 → **giữ lại pbkdf2 + sha1, không phải Firefox-only!**)
-- [ ] `decrypt_yandex` (key fix, AES-CBC) + `aes_gcm_decrypt_blob` (AAD support)
-- [ ] `decrypt_dpapi` — gọi wrapper OS (stub trả Err trên non-Windows)
-- [ ] **Verify**: port test vectors từ `crypto/*_test.go` + `browser/chromium/decrypt_*_test.go` (ciphertext mẫu có sẵn trong repo Go)
+### Phase 1 — Crypto core (pure Rust, không unsafe) ✅
+- [x] `DetectVersion` (prefix 3B: `v10/v11/v12/v20`, ngược lại → DPAPI pre-80; `strip_prefix`)
+- [x] `decrypt_chromium_gcm` (AES-256-GCM: 3B prefix + nonce 12B + ct+tag; bounds check `<3+12` → Err)
+- [x] `decrypt_chromium_cbc` (AES-128-CBC, IV cố định 0x20×16, PKCS5/7; **kEmptyKey fallback**: PBKDF2("", "saltysalt", 1, 16, SHA1) — retry khi KWallet race crbug.com/40055416 → **giữ lại pbkdf2 + sha1, không phải Firefox-only!**)
+- [x] `decrypt_yandex` (`decrypt_yandex_intermediate_key`: marker `v10` → 96B blob → GCM → sig `08 01 12 20` → 32B key) + `aes_gcm_decrypt_blob` (AAD support)
+- [x] `decrypt_dpapi` — `abi::dpapi` (CryptUnprotectData + LocalFree, `dwFlags=0` như Go), crypto delegate trên Windows, stub Err trên non-Windows
+- [x] **Verify**: port hết test `crypto/*_test.go` (crypto_test, yandex_test — 8 test mới) + round-trip DPAPI thật trên CI Windows (abi 3 test) — **72 test green, clippy -D warnings + fmt clean**
+- [x] **R10 review**: reviewer subagent lại lỗi infra ("no such column: replacement_seq" — cùng lỗi Phase 0) → review thủ công: đối chiếu từng dòng yandex.go/dpapi_windows.go vs Rust — marker idx (bytes.Index == windows().position), 96B truncate, sig 08 01 12 20, slice 32B, arg order CryptUnprotectData + dwFlags=0, LocalFree sau copy, error string parity 4/4 Yandex; 0 divergence behavior, chỉ khác cosmetic: `CryptoError::Dpapi("dpapi: ...")` bọc thêm prefix so với Go raw
 
 ### Phase 2 — SQLite util + extractor Chromium
 - [ ] `browser`: trait `Browser { browser_name(); user_data_dir(); profiles(); extract(cats); count_entries(cats) }` + trait `KeyManager { set_retrievers(); export_keys(); browser_key(); kind() }` + trait `Archivable { browser_key(); archive_sources(cats) }` (y hệt Go)

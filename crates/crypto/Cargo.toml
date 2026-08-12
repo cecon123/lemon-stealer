@@ -14,6 +14,9 @@ aes-gcm = { workspace = true }
 sha1 = { workspace = true }
 pbkdf2 = { workspace = true }
 thiserror = { workspace = true }
+# Windows-only DPAPI wrapper (Go: crypto_windows.go → utils/winapi). Layering OK:
+# abi sits at the bottom of the crate graph (R1), crypto only calls it on Windows.
+abi = { path = "../abi" }
 
 [dev-dependencies]
 hex = { workspace = true }

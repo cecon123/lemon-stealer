@@ -33,4 +33,20 @@ pub enum CryptoError {
     /// Invalid AES key length (Go: `aes.NewCipher` error).
     #[error("invalid AES key length {0}")]
     InvalidKeyLength(usize),
+    /// Go: `yandex: v10 marker not found in local_encryptor_data`.
+    #[error("yandex: v10 marker not found in local_encryptor_data")]
+    YandexMarkerNotFound,
+    /// Go: `yandex: encrypted intermediate key truncated`.
+    #[error("yandex: encrypted intermediate key truncated")]
+    YandexBlobShort,
+    /// Go: `yandex: invalid protobuf signature on decrypted key`.
+    #[error("yandex: invalid protobuf signature on decrypted key")]
+    YandexBadSignature,
+    /// Go: `yandex: decrypted intermediate key shorter than 32 bytes`.
+    #[error("yandex: decrypted intermediate key shorter than 32 bytes")]
+    YandexKeyTooShort,
+    /// Windows-only DPAPI failure, wrapped from `abi::dpapi` (Go surfaces the raw
+    /// `CryptUnprotectData: ...` error from winapi).
+    #[error("dpapi: {0}")]
+    Dpapi(String),
 }

@@ -27,6 +27,9 @@ aes-gcm = "0.10"
 sha1 = "0.10"
 pbkdf2 = "0.12"
 
+# WinAPI (in crates/abi only, R4): DPAPI = CryptUnprotectData/ProtectData (crypt32), LocalFree.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_Security_Cryptography"] }
+
 [workspace.lints.rust]
 # All unsafe lives in crates/abi (or #[cfg(windows)] modules there); enforced repo-wide.
 unsafe_code = "forbid"

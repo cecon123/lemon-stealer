@@ -44,6 +44,8 @@ Khi port file nào, dùng đúng dòng trong bảng này. Nếu cần lệch, gh
 | `//go:embed` payload | `include_bytes!` | ABE payload (Phase 5) |
 | `debug.ReadBuildInfo` | `build.rs` + env vars | version command (Phase 4) |
 | `expand env %VAR%` | **KHÔNG dùng `std::env`** | kernel32 `ExpandEnvironmentStringsW` qua abi (Phase 5) |
+| `winapi.DecryptDPAPI` (dpapi_windows.go) | `abi::dpapi::decrypt_dpapi` | `CryptUnprotectData` + `LocalFree`, `dwFlags=0` như Go (KHÔNG UI_FORBIDDEN), copy ra trước khi free; `DATA_BLOB` = windows-rs `CRYPT_INTEGER_BLOB` |
+| `bytes.Index(blob, "v10")` (yandex) | `windows()` + `position` | Yandex marker lookup + 96B blob (nonce12+ct+tag), protobuf sig `08 01 12 20`, slice 32B key đầu |
 
 ## 2. Bẫy semantic (đã biết — R2)
 
@@ -61,6 +63,12 @@ Khi port file nào, dùng đúng dòng trong bảng này. Nếu cần lệch, gh
 8. **`readdir` order**: filesystem-dependent; Go sort profile dirs? → đối chiếu
    chromium.go khi port profile discovery (Phase 2).
 9. **3DES/DES**: Safari-only → đã bỏ (không port). Firefox NSS PBE/ASN.1 → bỏ.
+10. **DPAPI dwFlags**: Go truyền `0`, KHÔNG phải `CRYPTPROTECT_UI_FORBIDDEN` — port
+    đúng như Go, đừng "sửa" thành UI_FORBIDDEN (hành vi khác: có thể prompt).
+11. **`LocalFree`**: Go gọi sau khi copy data ra. Rust: `from_raw_parts` copy rồi
+    `LocalFree(HLOCAL(pbData.cast()))`; không trả con trỏ ra khỏi `abi`.
+12. **Yandex blob**: Go cắt đúng 96B đầu sau `v10` và **bỏ qua junk phía sau**;
+    plaintext sau sig có thể >32B nhưng chỉ lấy 32B đầu (test TrailingDataIgnored).
 
 ## 3. Layer dependency (cấm vòng — R1)
 
@@ -70,7 +78,9 @@ abi (đáy, dùng bởi keyring/browser/filemanager)
 ```
 
 - `core` không depend gì (chỉ serde/chrono).
-- `crypto` pure Rust, tuyệt đối không windows-API.
+- `crypto` pure Rust, không windows-API trực tiếp — duy nhất `decrypt_dpapi`
+  (`#[cfg(windows)]`) delegate sang `abi::dpapi`, đúng như Go `crypto/*_windows.go`
+  → `utils/winapi`. Không unsafe trong crypto.
 - `browser` depend `core` + `keyring` + (sau) `filemanager`/`abi` → nhưng `abi` không
   depend ngược lại.
 - `cli` depend mọi thứ (boundary, dùng `anyhow`).

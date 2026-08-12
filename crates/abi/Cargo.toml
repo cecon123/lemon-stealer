@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lints]
-workspace = true
-
-# Safety override: this crate is the ONLY place WinAPI/unsafe is allowed (PLAN R4).
-# Parent workspace forbids `unsafe`; abi re-enables it deliberately and documents
-# every block with a // SAFETY: comment.
-
 [dependencies]
 thiserror = { workspace = true }
+windows = { workspace = true }
+
+# Safety override: this crate is the ONLY place WinAPI/unsafe is allowed (PLAN R4).
+# The workspace forbids `unsafe_code`; abi re-enables it deliberately and documents
+# every block with a // SAFETY: comment. Everything outside this crate stays forbid.
+[lints.rust]
+unsafe_code = "allow"
