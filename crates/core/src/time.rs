@@ -30,6 +30,11 @@ impl ChromeTime {
         ChromeTime(chrono_zero())
     }
 
+    /// The current UTC time (Go: `time.Now()` — used for `Dump.created_at`).
+    pub fn now() -> Self {
+        ChromeTime(Utc::now())
+    }
+
     pub fn from_utc(dt: DateTime<Utc>) -> Self {
         ChromeTime(dt)
     }

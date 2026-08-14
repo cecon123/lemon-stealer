@@ -110,20 +110,23 @@ impl Retriever for ChainRetriever {
     }
 }
 
+/// Test double: returns the fixed key or the fixed error. Lives outside
+/// `cfg(test)` so downstream crates (browser's discovery tests) can inject
+/// master-key tiers without reimplementing `Retriever`.
+pub struct StaticDummy(pub Option<Vec<u8>>, pub Option<RetrieverError>);
+
+impl Retriever for StaticDummy {
+    fn retrieve_key(&self, _hints: &Hints) -> Result<Option<Vec<u8>>, RetrieverError> {
+        match &self.1 {
+            Some(e) => Err(e.clone()),
+            None => Ok(self.0.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
-
-    pub struct StaticDummy(pub Option<Vec<u8>>, pub Option<RetrieverError>);
-
-    impl Retriever for StaticDummy {
-        fn retrieve_key(&self, _hints: &Hints) -> Result<Option<Vec<u8>>, RetrieverError> {
-            match &self.1 {
-                Some(e) => Err(e.clone()),
-                None => Ok(self.0.clone()),
-            }
-        }
-    }
 
     #[test]
     fn static_retriever_ok_none_means_tier_not_applicable() {

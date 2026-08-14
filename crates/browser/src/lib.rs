@@ -1,8 +1,19 @@
 //! Port of Go package `browser` (Windows subset).
 //!
-//! Phase 0: the `Browser` / `KeyManager` / `Archivable` traits that the whole
-//! discovery + extract flow hangs off (Go `browser/browser.go`, `browser/archive.go`).
-//! Concrete config table, discovery and the chromium engine land in Phase 2.
+//! Phase 2: the chromium engine and the Windows platform table are wired —
+//! [`discover`] iterates the table and builds [`chromium::Browser`] instances.
+//! Phase 0 traits (`Browser` / `KeyManager` / `Archivable`) remain the contract
+//! every engine implements (Go `browser/browser.go`, `browser/archive.go`).
+
+pub mod browser_windows;
+pub mod chromium;
+pub mod consts;
+pub mod discover;
+pub mod dump;
+
+pub use dump::{Dump, DumpError, HostInfo, Vault, build_dump, read_dump, write_dump};
+
+pub use browser_windows::platform_browsers;
 
 use hbd_core::{BrowserKind, Category, CountResult, ExtractResult, Profile};
 
@@ -36,6 +47,14 @@ pub trait Archivable {
     /// up one `<browser-key>/` entry of the archive zip.
     fn archive_sources(&self, categories: &[Category]) -> Result<Vec<String>, BrowserError>;
 }
+
+/// Combined extraction + key-management surface for the CLI: every supported
+/// engine on this Windows-only build implements both, so discovery returns one
+/// list that can dump keys and extract (Go: `DiscoverBrowsers` returning the
+/// `Browser` interface, with Chromium also satisfying `KeyManager`).
+pub trait ManagedBrowser: Browser + KeyManager {}
+
+impl<T: Browser + KeyManager> ManagedBrowser for T {}
 
 /// Opaque browser-layer error (Go surfaces open errors; entry-level failures inside
 /// extractors are logged and skipped, never propagated — see R3).

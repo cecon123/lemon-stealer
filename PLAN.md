@@ -124,80 +124,86 @@ Chỉ còn engine Chromium (kể cả Yandex/Opera variants — cùng code path,
 - [x] **Verify**: port hết test `crypto/*_test.go` (crypto_test, yandex_test — 8 test mới) + round-trip DPAPI thật trên CI Windows (abi 3 test) — **72 test green, clippy -D warnings + fmt clean**
 - [x] **R10 review**: reviewer subagent lại lỗi infra ("no such column: replacement_seq" — cùng lỗi Phase 0) → review thủ công: đối chiếu từng dòng yandex.go/dpapi_windows.go vs Rust — marker idx (bytes.Index == windows().position), 96B truncate, sig 08 01 12 20, slice 32B, arg order CryptUnprotectData + dwFlags=0, LocalFree sau copy, error string parity 4/4 Yandex; 0 divergence behavior, chỉ khác cosmetic: `CryptoError::Dpapi("dpapi: ...")` bọc thêm prefix so với Go raw
 
-### Phase 2 — SQLite util + extractor Chromium
-- [ ] `browser`: trait `Browser { browser_name(); user_data_dir(); profiles(); extract(cats); count_entries(cats) }` + trait `KeyManager { set_retrievers(); export_keys(); browser_key(); kind() }` + trait `Archivable { browser_key(); archive_sources(cats) }` (y hệt Go)
-- [ ] Windows config table (17 browser entries — xem bảng trên), resolve glob `*` (Arc/DuckDuckGo) = crate `glob`
-- [ ] `discover` + filter theo `-b` + override `-p`
-- [ ] **Profile discovery** (chromium.go): skip dirs (`System Profile`, `Guest Profile`, `Snapshot`); markers `Preferences` + `Preferences_02` (QQ/Sogou); 3-tier fallback: (1) marker-scan → (2) flat layout cho Opera (data ngay dưới UserDataDir) → (3) subdir có chứa source file (tree đã copy/restore thiếu Preferences)
-- [ ] **source path priority**: `sourcePath { rel, is_dir }`, candidates thử theo thứ tự (`Network/Cookies` → `Cookies`), match cả loại file/dir
-- [ ] **timeEpoch**: Chromium base::Time µs-since-1601 → UTC (offset `11644473600000000`), guard epoch<=0 và year ngoài 1..9999 → zero time
-- [ ] Chromium: đọc `Local State` (serde_json) → encrypted_key; extract theo loại:
-  - password (`Login Data`, query + sort CreatedAt desc), cookie (schema cũ + mới; **stripCookieHash**: Chrome 130+ prepend SHA256(host_key) 32B — decrypt xong phải strip nếu match; samesite int→string: -1 unspecified/0 none/1 lax/2 strict; sort desc), history/download, bookmark JSON, extension (`Secure Preferences`), creditcard (`Web Data`), storage (LevelDB `Local Storage/leveldb`, `Session Storage` — key prefix `_` data / `META:` / `METAACCESS:`; format byte 0x00=UTF-16LE, 0x01=Latin-1; **truncate value ≥2048B**)
-- [ ] **Opera**: extractor override extensions từ `opsettings`; flat profile layout
-- [ ] **Yandex**: sources `Ya Passman Data`/`Ya Credit Cards`; pipeline `loadYandexDataKey`: gate master-password (missing `meta` table hoặc `sealed_key` rỗng → false; set → warn + skip) → `meta.value WHERE key='local_encryptor_data'` → tìm marker `v10` → AES-GCM decrypt 96B blob (nonce 12B + ct + tag 16B) → verify protobuf signature `08 01 12 20` → lấy 32B đầu = data key; per-row GCM AAD = `SHA1(origin_url \0 user_elem \0 user_val \0 pass_elem \0 signon_realm)` (password) / `guid` (creditcard); creditcards đọc table `records(guid, public_data, private_data)` JSON blobs
-- [ ] `decrypt_value` dispatch v10/v11/v12/v20/DPAPI — port nguyên logic key-length dispatch (32B→GCM, 16B→CBC)
-- [ ] **sqliteutil** (port y hệt): guard file tồn tại trước khi mở (tránh sqlite tạo file rỗng), scan-row lỗi → skip + debug log (ngược lại CountRows fail-fast), `PRAGMA journal_mode=off` flag (giữ API cho parity; chromium truyền false)
-- [ ] **LevelDB reader** (Chromium Local + Session Storage): open dir leveldb (log + table files), iterate key/value, decode Snappy (crate `snap`) — port theo hành vi `goleveldb`
-- [ ] **Verify**: fixture test với DB giả lập (SQLite temp theo schema thật, insert hàng đã encrypt bằng key mẫu, assert giá trị giải mã)
+### Phase 2 — SQLite util + extractor Chromium ✅
+- [x] `browser`: trait `Browser { browser_name(); user_data_dir(); profiles(); extract(cats); count_entries(cats) }` + trait `KeyManager { set_retrievers(); export_keys(); browser_key(); kind() }` (trait `Archivable` defer cùng `archive`/`restore`)
+- [x] Windows config table (17 browser entries — xem bảng trên), resolve glob `*` (Arc/DuckDuckGo) = crate `glob`
+- [x] `discover` + filter theo `-b` + override `-p`
+- [x] **Profile discovery** (chromium.go): skip dirs (`System Profile`, `Guest Profile`, `Snapshot`); markers `Preferences` + `Preferences_02`; 3-tier fallback: marker-scan → flat layout Opera → subdir chứa source file
+- [x] **source path priority**: `sourcePath { rel, is_dir }`, candidates thử theo thứ tự, match cả file/dir
+- [x] **timeEpoch**: Chromium µs-since-1601 → UTC (offset `11644473600000000`), guard epoch<=0 / year ngoài 1..9999 → zero time
+- [x] Chromium: đọc `Local State` (serde_json) → encrypted_key; extract đầy đủ các loại:
+  - password (`Login Data`, sort CreatedAt desc), cookie (schema cũ + mới, **stripCookieHash** SHA256(host_key) 32B, samesite int→string, sort desc), history, download, bookmark JSON, extension (`Secure Preferences`), creditcard (`Web Data`), storage (LevelDB `Local Storage` + `Session Storage`, key prefix/data decode, **truncate ≥2048B**)
+- [x] **Opera**: extractor override extensions từ `opsettings`; flat profile layout
+- [x] **Yandex**: `Ya Passman Data`/`Ya Credit Cards`; pipeline `loadYandexDataKey` (master-password gate, `local_encryptor_data` marker `v10`, AES-GCM 96B blob, protobuf sig `08 01 12 20`, 32B data key); per-row AAD SHA1; `records(guid, public_data, private_data)`
+- [x] `decrypt_value` dispatch v10/v11/v12/v20/DPAPI — port nguyên key-length dispatch (32B→GCM, 16B→CBC)
+- [x] **sqliteutil**: guard file tồn tại, scan-row lỗi → skip + debug log, CountRows fail-fast, `PRAGMA journal_mode=off` flag
+- [x] **LevelDB reader** (Local + Session Storage): open dir, iterate key/value, Snappy (`snap`) — theo hành vi `goleveldb`
+- [x] **Verify**: 47 test browser-crate (extractor, leveldb, sqliteutil, source, storage…) all green
 
 ### Phase 2b — filemanager (Session + copyLocked) — Windows-critical
-- [ ] `Session/Acquire` (session.go): temp dir per run; copy file + **WAL/SHM companion** (`-wal`, `-shm`); copy dir skip suffix `lock`; normal copy fail → fallback
-- [ ] **copyLocked** (copy_windows.go): đọc file bị khoá độc quyền (Chrome `PRAGMA locking_mode=EXCLUSIVE`) qua `NtQuerySystemInformation(SystemHandleInformation)` → enumerate handle toàn hệ thống → match path (suffix từ `AppData\Local\`/`Roaming\`, fallback 3 component cuối) → `DuplicateHandle` → verify `GetFileType`==disk → `GetFinalPathNameByHandleW` match → đọc qua `CreateFileMapping`+`MapViewOfFile` (đọc cả WAL data từ kernel cache, gọn hơn ReadFile; ReadFile fallback)
-- [ ] **Verify**: port 6 test của `copy_windows_test.go` (exclusive lock, write-then-read, large file 64KB, not-found, acquire fallback) + session tests
+- [x] `Session/Acquire` (session.rs): temp dir per run; copy file + **WAL/SHM companion**; copy dir skip suffix `lock`; normal copy fail → fallback
+- [ ] **copyLocked** (copy_windows.go → `abi`/`copy_locked.rs`): đọc file bị khoá độc quyền (Chrome `PRAGMA locking_mode=EXCLUSIVE`) qua `NtQuerySystemInformation(SystemHandleInformation)` → enumerate handle → match path → `DuplicateHandle` → verify `GetFileType`==disk → `GetFinalPathNameByHandleW` → đọc qua `CreateFileMapping`+`MapViewOfFile`. **CHƯA PORT** — `session.rs` đang dùng `copy_locked_stub` trả lỗi; cookie bị khoá bởi Chrome đang chạy vẫn log `os error 32` (xem VERIFY.md) và bỏ qua
+- [x] **Verify**: 11 filemanager tests (session/new/cleanup/acquire/WAL/dir-skip-lock/not-found). Chưa có test 6 case của `copy_windows_test.go` (vì copyLocked chưa port)
 
-### Phase 3 — Keyring Windows (master keys)
-- [ ] Trait `Retriever { fn retrieve(&self, hints) -> Option<Vec<u8>> }` + `MasterKeys { v10, v20 }` (v11 = Linux-only → bỏ; có `has_any`); `NewMasterKeys` join per-tier error, retriever trả `(nil, nil)` = tier không áp dụng
-- [ ] `Hints { keychain_label (bỏ), windows_abe_key, local_state_path }`
-- [ ] DPAPIRetriever: đọc Local State → `os_crypt.encrypted_key` → base64 → verify prefix `DPAPI` (5B) → `CryptUnprotectData` (CRYPTPROTECT_UI_FORBIDDEN) — unsafe nằm trong `abi`
-- [ ] **Dump JSON schema** (dumpkeys): `{version:"2", created_at, host:{os,arch,hostname,user}, vaults:[{browser,kind("chromium"|"chromium-yandex"|"chromium-opera"), user_data_dir, profiles[], keys{v10,v20 base64}}]}`; WriteJSON indent 2sp; ReadJSON **strict version==2**, lỗi rõ nếu khác; vault bỏ khi `!has_any`
-- [ ] ABE retriever (v20): detail ở Phase 5
-- [ ] **Verify**: static retriever + round-trip encrypt/decrypt DPAPI trên CI Windows
+### Phase 3 — Keyring Windows (master keys) ✅
+- [x] Trait `Retriever { fn retrieve(&self, hints) -> Option<Vec<u8>> }` + `MasterKeys { v10, v20 }` (v11 bỏ; có `has_any`); `NewMasterKeys` join per-tier error, retriever trả `(nil, nil)` = tier không áp dụng
+- [x] `Hints { windows_abe_key, local_state_path }` (keychain_label bỏ)
+- [x] DPAPIRetriever: đọc Local State → `os_crypt.encrypted_key` → base64 → verify prefix `DPAPI` (5B) → `CryptUnprotectData` (`CRYPTPROTECT_UI_FORBIDDEN`) — unsafe trong `abi`
+- [x] **Dump JSON schema** (`build_dump`/`write_dump`): `{version:"2", created_at, host:{os,arch,hostname,user}, vaults:[{browser,kind,user_data_dir,profiles[],keys{v10,v20 base64}}]}`; indent 2sp; ReadJSON **strict version==2**, bỏ vault khi `!has_any`
+- [x] ABE retriever (v20) — Phase 5 (xong + verify thật trên Chrome 151)
+- [x] **Verify**: static retriever + DPAPI round-trip; keyring 20 test + dump tests (3) green
 
 ### Phase 4 — Output + CLI hoàn chỉnh
-- [ ] `Writer { dir, format }` + formatter trait; `Add(browser, profile, data)`; `Write()`: **aggregate per-category** → 1 file/category không rỗng (`password.csv`, `cookie.json`...), **format vào buffer trước** rồi mới tạo file (formatter rỗng → không tạo file), BOM `EF BB BF` chỉ cho CSV, summary log "Exported to X/" + từng file + count
-- [ ] json: indent 2 spaces, `SetEscapeHTML(false)` parity, flat `{browser, profile, ...fields}` đúng thứ tự Go reflect
-- [ ] csv: header `browser,profile,<fields>`, UTF-8 BOM, thứ tự cột y hệt
-- [ ] **cookie-editor**: chỉ dùng cho CookieEntry, ngược lại fallback json; `expirationDate` = Unix float (0 → omit + session=true), `sameSite`: "none"→"no_restriction", ""/"unspecified"→null; `hostOnly` = host không bắt đầu "."; `httpOnly`/`secure`/`session` bool
-- [ ] **fileutil zip 3 hành vi riêng biệt**: `CompressDir` (--zip: flatten basename, **xóa file gốc sau khi zip**), `ZipDir` (archive: giữ relative layout forward-slash, không xóa), `Unzip` (restore: **zip-slip guard**, file 0600); `FileExists`
-- [ ] **CLI commands đầy đủ**:
-  - `dump` (default): flags `-b -c -f -d -p --zip -v`; extractAndWrite port y hệt (log per-browser, lỗi extract không fail cả run)
-  - **`dumpkeys`** (lưu ý: tên command là `dumpkeys`, không phải dump-keys!): `-b`, `-o` (mặc định stdout, file mode 0600), dùng DiscoverBrowsersWithKeys → BuildDump
-  - **`restore`**: `--keys` (required; `-` = stdin), `--data-dir` XOR `--data-zip` (mutually exclusive); unzip vào temp rồi cleanup; BuildFromDump: layout detect archive (`<data-dir>/<browser>`) vs single User Data (cần `-b` khi nhiều vault), error khi filter không match vault
-  - **`archive`**: `-b -c -o` (default browser-data.zip); Archivable → ArchiveSources (Local State + resolved sources/ + Preferences markers, rel forward-slash, dedup, skip phantom level cho flat layout) → staging qua session (Acquire xử lý file bị lock) → ZipDir → `<browser-key>/<rel>` layout
-  - **`list`**: tabwriter 3 cột `Browser Profile Path`; `--detail` → cột per-category counts qua CountEntries (không decrypt)
-  - `version`: commit 8 chars từ VCS + build date (Rust: `build.rs` chạy git, github-actions env — không có debug.ReadBuildInfo)
-  - **double-click mode** (main_windows.go): detect Explorer-launch (mousetrap equivalent qua console/PPID check) → HideConsoleWindow (User32 ShowWindow SW_HIDE / FreeConsole)
-- [ ] logging: level DBG/INF/WRN/ERR/FTL (`-v` → Debug); Fatal → exit(1); parity format
-- [ ] **Verify**: golden-file test — chạy Go binary vs Rust binary trên cùng profile mẫu, diff output
+ - [x] `Writer { dir, format }` + formatter trait; `Add(browser, profile, data)`; `Write()`: **aggregate per-profile** → file per profile (`results/<browser>/<profile>/<category>.<ext>`), format vào buffer trước rồi mới tạo file, BOM CSV, summary. Output gom theo profile, mỗi profile 1 dòng `category count` + dòng tổng `Exported N entries across M files in K profile(s)`
+   - **DEVIATION :** KHÔNG flatten — output chia folder theo profile: `results/<browser>/<profile>/<category>.<ext>`. `sanitize_segment` tên segment. CompressDir đệ quy giữ relative layout (Go flatten basename — lệch có comment trong `zip.rs`)
+ - [x] json: indent 2 spaces, `SetEscapeHTML(false)` parity, flat `{browser, profile, ...fields}` đúng thứ tự Go reflect
+ - [x] csv: header `browser,profile,<fields>`, UTF-8 BOM, thứ tự cột y hệt
+ - [x] **cookie-editor**: `expirationDate` = Unix float (0 → omit + session=true), `sameSite`: "none"→"no_restriction", ""/"unspecified"→null; `hostOnly`; `httpOnly`/`secure`/`session`
+ - [x] **fileutil zip 3 hành vi**: `CompressDir` (--zip: xóa file gốc), `ZipDir` (archive: giữ rel layout), `Unzip` (restore: **zip-slip guard**); `FileExists`
+ - [x] **CLI commands**:
+   - [x] `dump` (default): flags `-b -c -f -d -p --zip -v`; extractAndWrite port y hệt (lỗi extract không fail cả run). Thêm log timing per-browser + `Done in X` (`format_duration`: `1.23s`/`45ms`/`890µs`)
+   - [x] **`dumpkeys`**: `-b`, `-o` (mặc định stdout, file mode 0600), DiscoverBrowsersWithKeys → BuildDump
+   - [ ] **`restore`**: `--keys`, `--data-dir` XOR `--data-zip`; Unzip → temp → BuildFromDump → extractAndWrite. **CLI flag đã có, handler `bail!("not implemented yet (Phase 5)")`**
+   - [ ] **`archive`**: `-b -c -o`; Archivable → ArchiveSources → staging → ZipDir. **Handler `bail!` tương tự restore**
+   - [x] **`list`**: tabwriter 3 cột; `--detail` → count per-category (không decrypt)
+   - [x] `version`: commit 8 chars + build date (build.rs git)
+   - [ ] **double-click mode** (main_windows.go): detect Explorer-launch → HideConsoleWindow. **CHƯA PORT**
+ - [x] logging: level DBG/INF/WRN/ERR/FTL (`-v` → Debug) — backend riêng `cli/logging.rs`(`[DBG] file.rs:42: msg`); Fatal = exit(1)
+ - [ ] **Verify**: golden-file test Go vs Rust trên profile mẫu (máy này Chrome ABE v20 — cần profile pre-127 hoặc Edge cũ)
 
-### Phase 5 — Windows ABE v20 (App-Bound Encryption) — Phần khó nhất, làm sau cùng
+### Phase 5 — Windows ABE v20 (App-Bound Encryption) ✅
 
 #### Cơ chế ABE (tóm tắt từ repo Go)
 Chrome 127+ gắn key master vào app identity → DPAPI hết hiệu lực. Repo Go **không phá mã hóa** mà
 "mượn quyền giải mã hợp lệ" của chính browser: spawn browser thật ở trạng thái suspended (kèm temp
 `--user-data-dir` để né ProcessSingleton), bơm reflective payload vào process, payload tự map chính
 nó (base relocations → link IAT → section protections → DllMain), gọi COM `IElevator::DecryptData`
-(CLSID/IID per-vendor, vtable slot 5=Chrome/Brave/CocCoc, 8=Edge, 13=Avast; IElevator2 rồi fallback
-v1) với ciphertext `os_crypt.app_bound_encrypted_key` (prefix `APPB`), rồi publish 32-byte key +
-status/err (marker 12-byte header) vào scratch region mà host đọc qua ReadProcessMemory.
+(CLSID/IID per-vendor, vtable slot per vendor) với ciphertext `os_crypt.app_bound_encrypted_key`
+(prefix `APPB`), rồi publish 32-byte key + status/err (marker header) vào scratch region mà host đọc
+qua ReadProcessMemory.
 
-#### Phân công port
-- [ ] `keyring`/`abe.rs`: orchestrator — đọc Local State, verify prefix `APPB`, base64, set env `HBD_ABE_ENC_B64`, gọi injector, nhận key, check len==32 (Rust thuần, dễ)
-- [ ] `abi`/`injector.rs`: CreateProcess (CREATE_SUSPENDED + UDD temp), VirtualAllocEx, WriteProcessMemory, ResumeThread + sleep 500ms, CreateRemoteThread, WaitForSingleObject (timeout 30s), ReadProcessMemory scratch, TerminateProcess — qua crate `windows` (trung bình)
-- [ ] `abi`/`pe.rs` (pure Rust): parse PE bao gồm `DetectPEArch` (chỉ support amd64 → error nếu khác), `FindExportFileOffset(payload, "Bootstrap")` (RVA export → raw file offset) dùng để launch thread; port từ `injector/pe_windows.go`
-- [ ] `abi`/`patch.rs`: `patch_preresolved_imports` — patch 5 function pointer vào DOS stub payload (nhờ KnownDlls + ASLR cùng session) (Rust thuần đọc/write bytes)
-- [ ] `browser/winutil.rs`: browser meta — ExeName, InstallFallbacks (registry App Paths + fallback paths), `ABEKind`, valid `WindowsABE: true` (Rust thuần, dễ)
-- [ ] **Payload C GIỮ NGUYÊN** (`abe_extractor.c`, `bootstrap.c`, `com_iid.c`, `bootstrap_layout.h` + Go-side layout constants): không viết lại Rust — phụ thuộc `__builtin_return_address` + `noinline`, không có runtime, COM vtable thủ công; mọi nỗ lực port là rủi ro không đáng. Build bằng `build.rs` gọi zig/cc → `abe_extractor_amd64.bin`, embed bằng `include_bytes!` (tương đương `//go:embed` + tag `abe_embed` của Go). Check layout offsets (`bootstrap_layout.h` low-level vs `layout.go` high-level) trùng khớp — sinh 1 lần bằng script, có test assert `size_of`/offset
-- [ ] `chrome.exe` path resolution port từ `winutil/browser_path_windows.go` — **ExecutablePath 4-tier**: (1) registry App Paths HKLM → (2) HKCU → (3) probe process đang chạy (EnumProcesses + QueryFullProcessImageNameW, match leaf name case-insensitive) → (4) InstallFallbacks (expand `%ProgramFiles%` qua ExpandEnvironmentStringsW)
-- [ ] ABE session key → localStorage leveldb decrypt (DPAPI + entropy) — port logic `LocalState`-independent
-- [ ] **Verify**: chỉ test thủ công trên máy Windows có Chrome 127+ (không có fixture an toàn). Fallback nếu thất bại: giữ DPAPI v10 + trả lỗi rõ khi gặp ciphertext v20 (như Go phiên bản cũ)
+**Lưu ý machine này**: Chrome 151 + forced ABE — **mọi** cookie/password là v20, key v10 DPAPI trong
+Local State là **dummy**. Verify chạy đúng toàn bộ trên Chrome 151 chỉ khi ABE retriever hoạt động.
+
+#### Phân công port — all done ✅ (đã verify thật)
+- [x] `keyring`/`abe.rs`: orchestrator — đọc Local State, verify prefix `APPB`, base64, set env, gọi injector, nhận key, check len==32
+- [x] `abi`/`injector.rs`: CreateProcess (CREATE_SUSPENDED + UDD temp), VirtualAllocEx, WriteProcessMemory, ResumeThread + settle, CreateRemoteThread, WaitForSingleObject (timeout), ReadProcessMemory scratch, TerminateProcess — crate `windows`
+- [x] `abi`/`pe.rs` (pure Rust): parse PE, `DetectPEArch` (amd64 → error nếu khác), `FindExportFileOffset(payload, "Bootstrap")` (RVA export → raw file offset)
+- [x] `abi`/`patch.rs`: `patch_preresolved_imports` — patch function pointer vào DOS stub payload (KnownDlls + ASLR)
+- [x] `browser`/`winutil` (→ `abi/winpaths.rs`): ExeName, InstallFallbacks (registry App Paths), ExecutablePath 4-tier: registry HKLM → HKCU → probe process đang chạy (EnumProcesses) → InstallFallbacks (expand `%ProgramFiles%`)
+- [x] **Payload C GIỮ NGUYÊN** (`abe_extractor.c`, `bootstrap.c`, `com_iid.c`, `bootstrap_layout.h` + constants) — build qua `zig cc` (`abe_native/Makefile.frag`), output `abe_extractor_amd64.bin` embed `include_bytes!`; test assert layout offset khớp
+- [x] **Root cause APPB bug**: injector nhận blob kèm prefix `APPB` → `IElevator::DecryptData` reject `0x8004a004`/`ERROR_INVALID_DATA`. Fix: strip `APPB_PREFIX` trong `read_app_bound_blob` (khớp Go `decoded[len("APPB"):]` + xaitax). Non-APPB/undersized → hard error; chỉ blob vắng → `Ok(None)`. Tests cập nhật (`appb_blob_survives_round_trip` mong đợi stripped bytes, `dpapi_prefixed_key_is_a_hard_error`)
+- [x] **Chống popup cửa sổ browser** (popup Chrome hiện lên rồi tắt khi inject): spawn thêm `--window-position=-32000,-32000 --window-size=1,1` → cửa sổ vẫn được tạo (payload ổn định, không như `--no-startup-window` bị Go tránh) nhưng nằm ngoài vùng hiển thị (crates/abi/src/injector.rs:216)
+- [x] localStorage LevelDB: đọc trực tiếp, không phụ thuộc ABE session key riêng
+- [x] **Verify**: thủ công trên Chrome 151 — xem `docs/VERIFY.md` (passwords 210/224, cookies ~99.7%, 14 hàng trống = giá trị rỗng thật trong DB, không còn `v20 retriever failed` WRN)
 
 ### Phase 6 — Parity & hardening
-- [ ] Chạy cả 2 binary trên cùng profile thật + **mọi subcommand** (lesson Bun: loop qua từng subcommand: dump/dumpkeys/archive/restore/list/version) → `diff` output & counts
-- [ ] Port toàn bộ test Go còn lại (R5: 0 test bị bỏ); rà lại test nào đang skip vì lý do gì
-- [ ] `cargo clippy -- -D warnings`, fmt, audit deps, release profile (LTO, strip, panic=abort, tối ưu kích thước cho binary portable)
+- [x] Hardening đã làm: `cargo fmt`, release profile `Cargo.toml` (LTO, `codegen-units=1`, `panic=abort`, `strip`, `opt-level=s`), `cargo clippy --workspace --all-targets -- -D warnings` sạch, `cargo build --release` OK, **`cargo-audit`: 0 lỗ hổng trên 136 deps**
+- [ ] Chạy cả 2 binary trên cùng profile thật + **mọi subcommand** → `diff` output & counts (restore/archive chưa xong nên chưa so được đầy đủ)
+- [ ] Port toàn bộ test Go còn lại; rà test nào skip vì lý do gì (copyLocked 6 test chưa port — chờ Phase 2b)
 - [ ] Đọc lại `rfcs/` trong repo Go — port các RFC đang active
 - [ ] Refactor idiomatic Rust (chỉ SAU khi parity xanh — R0): giảm unsafe, tách module, cleanup
+- [ ] Còn thiếu của Phase 4: `archive`, `restore`, `double-click mode`
 
 ## 4. RULES (bắt buộc khi port)
 
@@ -270,24 +276,25 @@ status/err (marker 12-byte header) vào scratch region mà host đọc qua ReadP
 
 | Rủi ro | Độ khó | Mitigation |
 |---|---|---|
-| **ABE v20 (reflective PE injection + payload encryption)** | Cao nhất | Defer Phase 5; isolate toàn bộ unsafe trong `abi`; test thủ công trên Chrome 127+. Fallback: DPAPI v10 + lỗi rõ khi gặp v20. |
-| **copyLocked (file bị khoá độc quyền)** | Cao | NtQuerySystemInformation + DuplicateHandle + FileMapping — nhiều unsafe; port test có sẵn trong `copy_windows_test.go`; đơn giản hoá: fallback trả lỗi rõ nếu handle không tìm thấy (Go cũng vậy — lỗi rõ, không panic) |
-| **LevelDB reader (Chromium storage)** | Trung bình | Tự viết tối thiểu log+table, xử lý Snappy (`snap` crate); verify bằng fixture LevelDB dir thật |
-| `reflect`-based output parity | Trung bình | Snapshot JSON/CSV chính xác thứ tự field (Go reflect order = struct order — Rust struct order giống hệt). |
-| Chromium v12 (SecretPortal) | Thấp | Linux-only → không cần implement; giữ error "unsupported" giống Go. |
-| Glob profile `*` (Arc/DuckDuckGo) | Thấp | crate `glob`, port logic `resolve_globs`. |
-| DPAPI entropy/scope khác phiên bản | Thấp | Dùng đúng flags `CRYPTPROTECT_UI_FORBIDDEN`; test round-trip trên CI Windows. |
+| **ABE v20 (reflective PE injection + payload encryption)** | Cao nhất | ✅ XONG — isolate unsafe trong `abi`; verify thật trên Chrome 151 (`docs/VERIFY.md`). APPB-prefix bug đã sửa; popup browser được đẩy offscreen |
+| **copyLocked (file bị khoá độc quyền)** | Cao | CHƯA PORT — `session::copy_locked_stub` trả lỗi; NtQuerySystemInformation + DuplicateHandle + FileMapping defer để tránh unsafe. Cookie bị khoá vẫn bị bỏ qua |
+| **LevelDB reader (Chromium storage)** | Trung bình | ✅ tự viết log+table, Snappy (`snap`); test leveldb fixture + rust-card WAL/single-file |
+| `reflect`-based output parity | Trung bình | ✅ snapshot JSON/CSV đúng thứ tự field (Rust struct order = Go). Chưa golden-diff với Go binary |
+| Chromium v12 (SecretPortal) | Thấp | Linux-only → không cần implement; giữ error "unsupported" giống Go |
+| Glob profile `*` (Arc/DuckDuckGo) | Thấp | crate `glob`, port logic `resolve_globs` |
+| DPAPI entropy/scope khác phiên bản | Thấp | Dùng đúng flags `CRYPTPROTECT_UI_FORBIDDEN`; test round-trip. Lưu ý Chrome 151: key v10 trong Local State là dummy (ABE) |
 
 ## 6. Ước lượng & thứ tự làm
 
 ```
-Phase 0-1 (core + crypto)   → nền móng, test sớm nhất
-Phase 2 (chromium extract)  → giá trị nhất, toàn bộ browsers Windows (kèm 2b: filemanager/copyLocked)
-Phase 3 (DPAPI keyring)     → mở khóa được v10 (chiếm phần lớn dữ liệu)
-Phase 4 (output + CLI)      → MVP dùng được: dump/dumpkeys/archive/restore/list/version === Go binary (trừ Chrome 127+ / v20)
-Phase 5 (ABE v20)           → phủ Chrome 127+, Edge, Brave trên Windows (phần còn thiếu)
-Phase 6 (parity)            → đóng gói
+Phase 0-1 (core + crypto)   → nền móng ✅ (committed)
+Phase 2 (chromium extract)  → toàn bộ browsers Windows ✅
+Phase 2b (session/zip)      → ✅ (còn copyLocked: chưa port)
+Phase 3 (DPAPI keyring)     → ✅
+Phase 4 (output + CLI)      → MVP dùng được: dump/dumpkeys/list/version ✅ (archive/restore + double-click: TODO)
+Phase 5 (ABE v20)           → ✅ verify thật trên Chrome 151
+Phase 6 (parity + còn lại)  → hardening ✅; archive/restore/double-click + parity diff + port test còn thiếu
 ```
 
-Checkpoint "MVP dùng được": sau Phase 4, `LemonStealer dump -b chrome -c all -f json` output
-khớp Go binary trên Windows cho profile pre-127. Sau Phase 5: khớp cả Chrome 127+ (v20).
+Checkpoint "MVP dùng được": `LemonStealer dump -b chrome -c all -f json` output
+khớp Go binary trên Windows cho profile pre-127. Sau Phase 5: khớp cả Chrome 127+ (v20) — verified trên Chrome 151.

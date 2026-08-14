@@ -91,6 +91,7 @@ pub fn non_sensitive_categories() -> Vec<Category> {
 /// keys dump — don't change them lightly. `Firefox`/`Safari` are kept only for
 /// `String()` parity with Go; this build never produces them (Windows + Chromium only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BrowserKind {
     Chromium,
     /// Chromium variant with different file names and extract logic.

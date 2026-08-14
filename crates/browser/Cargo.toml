@@ -10,4 +10,19 @@ workspace = true
 [dependencies]
 hbd_core = { path = "../core" }
 keyring = { path = "../keyring" }
+hbd_crypto = { path = "../crypto", package = "crypto" }
+filemanager = { path = "../filemanager" }
 thiserror = { workspace = true }
+rusqlite = { workspace = true }
+glob = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+snap = { workspace = true }
+crc32c = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

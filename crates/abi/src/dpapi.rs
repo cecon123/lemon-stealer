@@ -12,7 +12,9 @@
 //! (`{ cbData: u32, pbData: *mut u8 }`).
 
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
-use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
+use windows::Win32::Security::Cryptography::{
+    CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
+};
 
 use crate::AbiError;
 
@@ -58,26 +60,47 @@ pub fn decrypt_dpapi(ciphertext: &[u8]) -> Result<Vec<u8>, AbiError> {
     }
 }
 
+/// Protects a blob with the current user's DPAPI master key
+/// (Go: `CryptProtectData`; the inverse of [`decrypt_dpapi`]).
+///
+/// Public so keyring's DPAPI retriever tests can build a real fixture
+/// (PLAN.md Phase 3: "round-trip encrypt/decrypt DPAPI trên CI Windows").
+pub fn protect_dpapi(plaintext: &[u8]) -> Result<Vec<u8>, AbiError> {
+    let in_blob = blob_from_bytes(plaintext);
+    let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    // SAFETY: `in_blob` borrows `plaintext` for the duration of the call and
+    // CryptProtectData does not retain it after returning. `out_blob` is
+    // zero-initialized; on success the callee fills it with a freshly
+    // LocalAlloc'd buffer (cbData + pbData) that we copy out and free below.
+    let result = unsafe { CryptProtectData(&in_blob, None, None, None, None, 0, &mut out_blob) };
+
+    match result {
+        Ok(()) => {
+            // SAFETY: on success, out_blob.pbData points to a LocalAlloc'd buffer
+            // of out_blob.cbData bytes owned by us until LocalFree below; the
+            // bounds come from the OS, not from our input.
+            let out = unsafe {
+                std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
+            };
+            // SAFETY: LocalFree releases the buffer allocated by CryptProtectData;
+            // `out` is an independent copy, so freeing here cannot dangle it.
+            unsafe {
+                LocalFree(Some(HLOCAL(out_blob.pbData.cast())));
+            }
+            Ok(out)
+        }
+        Err(e) => Err(AbiError::CryptProtectData(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Security::Cryptography::CryptProtectData;
-
     use super::*;
 
     /// Reverse of `decrypt_dpapi` for round-trip testing (Go: `encryptWithDPAPI`
     /// in browser/chromium/decrypt_windows_test.go). Same dwFlags = 0 contract.
-    fn protect(bytes: &[u8]) -> Result<Vec<u8>, windows::core::Error> {
-        let in_blob = blob_from_bytes(bytes);
-        let mut out_blob = CRYPT_INTEGER_BLOB::default();
-        // SAFETY: same borrow obligations as decrypt_dpapi; the output blob is
-        // zero-initialized and filled by the callee, freed below after copying.
-        unsafe {
-            CryptProtectData(&in_blob, None, None, None, None, 0, &mut out_blob)?;
-            let out =
-                std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
-            LocalFree(Some(HLOCAL(out_blob.pbData.cast())));
-            Ok(out)
-        }
+    fn protect(bytes: &[u8]) -> Result<Vec<u8>, AbiError> {
+        protect_dpapi(bytes)
     }
 
     // Port of the DPAPI round-trip coverage from decrypt_windows_test.go

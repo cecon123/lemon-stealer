@@ -18,7 +18,27 @@
 #[cfg(windows)]
 pub mod dpapi;
 #[cfg(windows)]
-pub use dpapi::decrypt_dpapi;
+pub mod injector;
+#[cfg(windows)]
+pub mod patch;
+#[cfg(windows)]
+pub mod payload;
+#[cfg(windows)]
+pub mod pe;
+#[cfg(windows)]
+pub mod winpaths;
+#[cfg(windows)]
+pub use dpapi::{decrypt_dpapi, protect_dpapi};
+#[cfg(windows)]
+pub use injector::{InjectError, Injector, inject};
+#[cfg(windows)]
+pub use patch::{PatchError, patch_preresolved_imports};
+#[cfg(windows)]
+pub use payload::{KEY_LEN, KEY_STATUS_READY, PAYLOAD_AMD64};
+#[cfg(windows)]
+pub use pe::{PeArch, PeError, detect_pe_arch, find_export_file_offset};
+#[cfg(windows)]
+pub use winpaths::{AbeKind, WinpathError, executable_path};
 
 /// Errors produced by the WinAPI surface (all variants carry the raw OS error).
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +46,9 @@ pub enum AbiError {
     /// Go: `CryptUnprotectData: %w` (dpapi_windows.go).
     #[error("CryptUnprotectData: {0}")]
     CryptUnprotectData(windows::core::Error),
+    /// Go: `CryptProtectData: %w` (inverse path, used for test fixtures).
+    #[error("CryptProtectData: {0}")]
+    CryptProtectData(windows::core::Error),
     /// Go: `LocalFree` is called without error checking, but a failure here means
     /// the freed pointer is gone while the failure itself is only observable via
     /// the returned handle — treated as fatal for the operation.

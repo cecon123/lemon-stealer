@@ -6,3 +6,8 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+# archive/zip parity: Deflate only (no bzip2/lzma/zstd baggage)
+zip = { version = "4", default-features = false, features = ["deflate"] }

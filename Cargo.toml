@@ -11,7 +11,7 @@ license = "MIT"
 # abi at the bottom, used by keyring/browser/filemanager. Enforced by cargo machete/udeps in CI.
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["std", "clock"] }
 thiserror = "2.0"
 anyhow = "1.0"
@@ -28,7 +28,33 @@ sha1 = "0.10"
 pbkdf2 = "0.12"
 
 # WinAPI (in crates/abi only, R4): DPAPI = CryptUnprotectData/ProtectData (crypt32), LocalFree.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_Security_Cryptography"] }
+# Phase 5 adds: Threading (CreateProcess/CreateRemoteThread/…), ProcessStatus (K32EnumProcesses),
+# Registry (App Paths), LibraryLoader (GetProcAddress addrs), Environment (ExpandEnvironmentStringsW).
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Environment",
+    "Win32_System_Diagnostics_Debug",
+] }
+
+# Phase 2 (chromium engine)
+# rusqlite = Go modernc.org/sqlite (SQL identical; bundled = no system SQLite dependency)
+rusqlite = { version = "0.40", features = ["bundled"] }
+# glob = Go filepath.Glob for MSIX/UWP `*` profiles (Arc, DuckDuckGo)
+glob = "0.3"
+# log: facade only; the -v bound backend (fern/env_logger) lands Phase 4 (cli)
+log = { version = "0.4", features = ["std"] }
+# snap: LevelDB Snappy block compression (goleveldb equivalent, Phase 2 storage)
+snap = "1.1"
+# crc32c: LevelDB log/table block checksums (Castagnoli, same polynomial as Go zstd/crc32c)
+crc32c = "0.6"
+# sha2: Chrome 130+ cookie value SHA256(host_key) prefix stripping (extract_cookie)
+sha2 = "0.10"
 
 [workspace.lints.rust]
 # All unsafe lives in crates/abi (or #[cfg(windows)] modules there); enforced repo-wide.
@@ -36,4 +62,7 @@ unsafe_code = "forbid"
 
 [profile.release]
 lto = true
+codegen-units = 1
+panic = "abort"
 strip = true
+opt-level = "s"

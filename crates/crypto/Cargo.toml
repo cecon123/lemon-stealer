@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# lib name is `hbd_crypto` (same pattern as hbd_core) so downstream crates
+# don't shadow the builtin `::crypto`.
+[lib]
+name = "hbd_crypto"
+
 [lints]
 workspace = true
 

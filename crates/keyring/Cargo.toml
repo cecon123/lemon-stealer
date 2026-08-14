@@ -8,10 +8,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+abi = { path = "../abi" }
 hbd_core = { path = "../core" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 base64 = "0.22"
-
-[dev-dependencies]
-serde_json = { workspace = true }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

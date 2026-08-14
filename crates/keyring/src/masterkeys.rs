@@ -59,13 +59,22 @@ pub struct Retrievers {
 ///
 /// Phase 3: full parity (Go `NewMasterKeys`, including error joining with tier names).
 #[allow(dead_code)]
-pub fn new_master_keys(r: Retrievers, hints: Hints) -> Result<MasterKeys, Vec<RetrieverError>> {
+pub fn new_master_keys(r: &Retrievers, hints: Hints) -> Result<MasterKeys, Vec<RetrieverError>> {
+    let (keys, errs) = new_master_keys_partial(r, hints);
+    if errs.is_empty() { Ok(keys) } else { Err(errs) }
+}
+
+/// Like [`new_master_keys`] but always hands back the partial keys, so callers
+/// (Go: `ExportKeys` + `masterKeys`) can keep the tiers that succeeded even when
+/// another tier failed — a Chrome 127+ profile mixes v10+v20, so a v20-only
+/// failure must not discard a usable v10 key.
+pub fn new_master_keys_partial(r: &Retrievers, hints: Hints) -> (MasterKeys, Vec<RetrieverError>) {
     let mut keys = MasterKeys::default();
     let mut errs = Vec::new();
     for (name, retriever, dst) in [
-        ("v10", r.v10, &mut keys.v10),
-        ("v11", r.v11, &mut keys.v11),
-        ("v20", r.v20, &mut keys.v20),
+        ("v10", r.v10.as_ref(), &mut keys.v10),
+        ("v11", r.v11.as_ref(), &mut keys.v11),
+        ("v20", r.v20.as_ref(), &mut keys.v20),
     ] {
         let Some(retriever) = retriever else { continue };
         match retriever.retrieve_key(&hints) {
@@ -77,13 +86,13 @@ pub fn new_master_keys(r: Retrievers, hints: Hints) -> Result<MasterKeys, Vec<Re
             }),
         }
     }
-    if errs.is_empty() { Ok(keys) } else { Err(errs) }
+    (keys, errs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retriever::tests::StaticDummy;
+    use crate::retriever::StaticDummy;
 
     #[test]
     fn has_any_matches_go() {
@@ -119,7 +128,7 @@ mod tests {
             v20: Some(Box::new(StaticDummy(Some(vec![3]), None))),
             ..Default::default()
         };
-        let keys = new_master_keys(r, Hints::default()).unwrap();
+        let keys = new_master_keys(&r, Hints::default()).unwrap();
         assert_eq!(Some(vec![1, 2]), keys.v10);
         assert_eq!(None, keys.v11, "nil tier stays nil");
         assert_eq!(Some(vec![3]), keys.v20);
@@ -132,7 +141,7 @@ mod tests {
             v10: Some(Box::new(StaticDummy(None, None))),
             ..Default::default()
         };
-        let keys = new_master_keys(r, Hints::default()).unwrap();
+        let keys = new_master_keys(&r, Hints::default()).unwrap();
         assert_eq!(None, keys.v10);
         assert!(!keys.has_any());
     }
@@ -147,7 +156,7 @@ mod tests {
             v20: Some(Box::new(StaticDummy(Some(vec![7]), None))),
             ..Default::default()
         };
-        let errs = new_master_keys(r, Hints::default()).unwrap_err();
+        let errs = new_master_keys(&r, Hints::default()).unwrap_err();
         assert_eq!(1, errs.len());
         let s = errs[0].to_string();
         assert!(s.starts_with("v10: "), "tier name in join, got {s}");
