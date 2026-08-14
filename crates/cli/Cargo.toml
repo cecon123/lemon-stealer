@@ -16,4 +16,5 @@ keyring = { path = "../keyring" }
 browser = { path = "../browser" }
 output = { path = "../output" }
 filemanager = { path = "../filemanager" }
+bypass = { path = "../bypass" }
 log = { workspace = true }

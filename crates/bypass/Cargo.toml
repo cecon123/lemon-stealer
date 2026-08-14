@@ -1,0 +1,10 @@
+[package]
+name = "bypass"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AV/EDR evasion primitives — string encryption, payload entropy, sandbox gate (safe-only)"
+
+[dependencies]
+abi = { path = "../abi" }
+obfstr = { workspace = true }

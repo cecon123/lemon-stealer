@@ -190,6 +190,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "bypass"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "obfstr",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -283,6 +291,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "browser",
+ "bypass",
  "clap",
  "filemanager",
  "hbd_core",
@@ -627,6 +636,7 @@ version = "0.1.0"
 dependencies = [
  "abi",
  "base64",
+ "bypass",
  "hbd_core",
  "serde",
  "serde_json",
@@ -681,6 +691,12 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "obfstr"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cf5f1acbf6ef57cef9d127e72c4afd01d6b08692616fd09afad7f7807d6eb78"
 
 [[package]]
 name = "once_cell"

