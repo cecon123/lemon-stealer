@@ -43,14 +43,16 @@ pub fn looks_sandboxed() -> bool {
 
 /// Scans the process environment for VM/CI markers. Pure, no OS calls.
 fn has_vm_env_hint() -> bool {
-    VM_ENV_HINTS.iter().any(|h| std::env::vars_os().any(|(k, _)| {
-        k.to_string_lossy().to_ascii_uppercase().contains(h)
-    }))
+    VM_ENV_HINTS.iter().any(|h| {
+        std::env::vars_os().any(|(k, _)| k.to_string_lossy().to_ascii_uppercase().contains(h))
+    })
 }
 
 /// Logical CPU count via the std library (waits for nothing, safe).
 fn cpu_count() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 /// Sleep a jittered, pseudo-random-ish delay so the process isn't born
@@ -103,9 +105,8 @@ mod tests {
     }
 
     #[test]
-    fn gate_is_boolean() {
-        let g = gate();
-        assert!(g || !g);
+    fn gate_returns_some_boolean() {
+        let _g = gate(); // boolean by construction; keep the call live.
     }
 
     #[test]

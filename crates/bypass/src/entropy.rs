@@ -25,7 +25,9 @@ const N: usize = PAYLOAD_AMD64.len();
 
 /// The mangled payload: XOR'd at const time, so it is the exact bytes that
 /// land in the image. No MZ header survives, hence no `include_bytes` raw-PE
-/// signature and no easy `strings` read.
+/// signature and no easy `strings` read. A single const array (not bytes!) is
+/// the whole point: it is embedded verbatim as one opaque blob.
+#[allow(clippy::large_const_arrays)]
 pub const MANGLED: [u8; N] = mangled();
 
 const fn mangled() -> [u8; N] {
@@ -67,7 +69,7 @@ mod tests {
 
     #[test]
     fn mangled_is_fingerprint_different_from_plain() {
-        assert_ne!(&MANGLED[..], &PAYLOAD_AMD64[..]);
+        assert_ne!(&MANGLED[..], PAYLOAD_AMD64);
     }
 
     #[test]

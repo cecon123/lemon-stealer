@@ -30,8 +30,7 @@ pub use obfstr::{hash, obfbytes, obfcstr, obfstring, obfwide, random, splitmix};
 macro_rules! x {
     ($lit:literal, $key:expr) => {{
         const N: usize = $lit.len();
-        const BUF: [u8; N] =
-            $crate::strings::enc::<N>($lit.as_bytes(), $key);
+        const BUF: [u8; N] = $crate::strings::enc::<N>($lit.as_bytes(), $key);
         $crate::strings::dec_str::<N>(&BUF, $key)
     }};
 }
@@ -162,8 +161,7 @@ mod tests {
         const KEY: u32 = 0x10203040;
         const PAD: usize = crate::strings::pad_len(LEN);
         const KS: [u8; LEN] = crate::strings::stream(KEY);
-        const CIPHER: ([u8; LEN], [u8; PAD]) =
-            crate::strings::hide(b"Login Data", &KS, KEY);
+        const CIPHER: ([u8; LEN], [u8; PAD]) = crate::strings::hide(b"Login Data", &KS, KEY);
         assert_ne!(&CIPHER.0, b"Login Data", "on-disk bytes must differ");
         // deobfuscate is a runtime fn (volatile reads) — call it, not const.
         let revealed = crate::strings::show(&CIPHER.0, &KS);

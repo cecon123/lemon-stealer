@@ -16,6 +16,8 @@
 //! - Console: `ShowWindow`/`FreeConsole` (double-click mode) — Phase 4
 
 #[cfg(windows)]
+pub mod apitable;
+#[cfg(windows)]
 pub mod dpapi;
 #[cfg(windows)]
 pub mod injector;
@@ -25,6 +27,8 @@ pub mod patch;
 pub mod payload;
 #[cfg(windows)]
 pub mod pe;
+#[cfg(windows)]
+pub mod resolve;
 #[cfg(windows)]
 pub mod winpaths;
 #[cfg(windows)]
@@ -37,6 +41,8 @@ pub use patch::{PatchError, patch_preresolved_imports};
 pub use payload::{KEY_LEN, KEY_STATUS_READY, PAYLOAD_AMD64};
 #[cfg(windows)]
 pub use pe::{PeArch, PeError, detect_pe_arch, find_export_file_offset};
+#[cfg(windows)]
+pub use resolve::{api, hash_bytes, module_base};
 #[cfg(windows)]
 pub use winpaths::{AbeKind, WinpathError, executable_path};
 

