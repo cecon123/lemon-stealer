@@ -108,9 +108,15 @@ impl std::fmt::Display for InjectError {
             Pe(e) => write!(f, "injector: {e}"),
             Patch(e) => write!(f, "{e}"),
             MakeTempDir(e) => write!(f, "injector: make temp user-data-dir: {e}"),
-            CreateProcess(e) => write!(f, "injector: CreateProcess: {e}"),
+            CreateProcess(e) => write!(f, "injector: {}: {e}", crate::xs!("CreateProcess", 0x61)),
             VirtualAllocEx(e) => write!(f, "injector: {e}"),
-            WriteProcessMemory(e) => write!(f, "injector: WriteProcessMemory: {e}"),
+            WriteProcessMemory(e) => {
+                write!(
+                    f,
+                    "injector: {}: {e}",
+                    crate::xs!("WriteProcessMemory", 0x62)
+                )
+            }
             CreateRemoteThread(e) => write!(f, "injector: {e}"),
             DeadTarget { cause, exit_code } => {
                 write!(
@@ -122,7 +128,13 @@ impl std::fmt::Display for InjectError {
                 f,
                 "injector: {cause} (target alive; likely EDR/AV blocking remote-thread injection)"
             ),
-            WaitForSingleObject(e) => write!(f, "injector: WaitForSingleObject: {e}"),
+            WaitForSingleObject(e) => {
+                write!(
+                    f,
+                    "injector: {}: {e}",
+                    crate::xs!("WaitForSingleObject", 0x63)
+                )
+            }
             RemoteTimeout(wait) => write!(
                 f,
                 "injector: remote Bootstrap thread timed out after {wait:?}"
@@ -146,7 +158,7 @@ impl std::fmt::Display for InjectError {
                 f,
                 "injector: payload signaled ready but key length is {n} (want {KEY_LEN})"
             ),
-            Terminate(e) => write!(f, "injector: TerminateProcess: {e}"),
+            Terminate(e) => write!(f, "injector: {}: {e}", crate::xs!("TerminateProcess", 0x64)),
         }
     }
 }

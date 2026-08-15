@@ -1,0 +1,19 @@
+# Normalize line endings: check out as native (LF on CI/Linux, CRLF on Windows),
+# but always store LF in the repo.
+* text=auto
+
+# Text files are normalized to LF in the repo.
+*.rs text
+*.md text
+*.toml text
+*.yml text
+*.yaml text
+*.json text
+*.c text
+*.h text
+Makefile* text
+
+# Binary assets stay untouched.
+*.bin binary
+*.exe binary
+*.lib binary

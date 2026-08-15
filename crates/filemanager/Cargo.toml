@@ -9,5 +9,6 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
-# archive/zip parity: Deflate only (no bzip2/lzma/zstd baggage)
-zip = { version = "4", default-features = false, features = ["deflate"] }
+# archive/zip parity: Deflate only (no bzip2/lzma/zstd baggage).
+# aes-crypto: AES-256 zip encryption for the Telegram exfil archive.
+zip = { version = "4", default-features = false, features = ["deflate", "aes-crypto"] }

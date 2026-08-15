@@ -42,12 +42,15 @@ impl fmt::Display for PatchError {
 
 impl std::error::Error for PatchError {}
 
+// Module hashes are precomputed at compile time from byte literals so the DLL
+// names never reach the image as strings. Export names are kept in `SPECS`
+// only because `PatchError::MissingImport` reports them.
+const MOD_KERNEL32: u32 = hash_mod_bytes(b"kernel32.dll");
+const MOD_NTDLL: u32 = hash_mod_bytes(b"ntdll.dll");
+
 /// Resolve one export address by hashed names (no strings in the binary).
-fn module_export_addr(module: &str, export: &str) -> Option<usize> {
-    api(
-        hash_mod_bytes(module.as_bytes()),
-        hash_bytes(export.as_bytes()),
-    )
+fn module_export_addr(module_hash: u32, export: &str) -> Option<usize> {
+    api(module_hash, hash_bytes(export.as_bytes()))
 }
 
 /// Port of `patchPreresolvedImports`: copy `payload` and write the five
@@ -58,16 +61,16 @@ pub fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>, PatchError> 
         return Err(PatchError::TooSmall(payload.len()));
     }
 
-    const SPECS: [(&str, &str); 5] = [
-        ("kernel32.dll", "LoadLibraryA"),
-        ("kernel32.dll", "GetProcAddress"),
-        ("kernel32.dll", "VirtualAlloc"),
-        ("kernel32.dll", "VirtualProtect"),
-        ("ntdll.dll", "NtFlushInstructionCache"),
+    const SPECS: [(&str, u32); 5] = [
+        ("LoadLibraryA", MOD_KERNEL32),
+        ("GetProcAddress", MOD_KERNEL32),
+        ("VirtualAlloc", MOD_KERNEL32),
+        ("VirtualProtect", MOD_KERNEL32),
+        ("NtFlushInstructionCache", MOD_NTDLL),
     ];
     let mut addrs = [0usize; 5];
-    for (i, (module, export)) in SPECS.iter().enumerate() {
-        let Some(addr) = module_export_addr(module, export) else {
+    for (i, (export, module)) in SPECS.iter().enumerate() {
+        let Some(addr) = module_export_addr(*module, export) else {
             return Err(PatchError::MissingImport(export));
         };
         addrs[i] = addr;
@@ -97,11 +100,11 @@ mod tests {
     fn resolved_addresses_are_nonzero_in_this_process() {
         // The ASLR/KnownDlls contract is machine-local; on the dev box these
         // five addresses must resolve before anything is spawned.
-        assert!(module_export_addr("kernel32.dll", "LoadLibraryA").is_some());
-        assert!(module_export_addr("kernel32.dll", "GetProcAddress").is_some());
-        assert!(module_export_addr("kernel32.dll", "VirtualAlloc").is_some());
-        assert!(module_export_addr("kernel32.dll", "VirtualProtect").is_some());
-        assert!(module_export_addr("ntdll.dll", "NtFlushInstructionCache").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "LoadLibraryA").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "GetProcAddress").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "VirtualAlloc").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "VirtualProtect").is_some());
+        assert!(module_export_addr(MOD_NTDLL, "NtFlushInstructionCache").is_some());
     }
 
     #[test]

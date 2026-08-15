@@ -62,16 +62,16 @@ impl From<i32> for Category {
 impl std::fmt::Display for Category {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            Category::PASSWORD => f.write_str("password"),
-            Category::COOKIE => f.write_str("cookie"),
-            Category::BOOKMARK => f.write_str("bookmark"),
-            Category::HISTORY => f.write_str("history"),
-            Category::DOWNLOAD => f.write_str("download"),
-            Category::CREDIT_CARD => f.write_str("creditcard"),
-            Category::EXTENSION => f.write_str("extension"),
-            Category::LOCAL_STORAGE => f.write_str("localstorage"),
-            Category::SESSION_STORAGE => f.write_str("sessionstorage"),
-            _ => f.write_str("unknown"),
+            Category::PASSWORD => f.write_str(bypass::x!("password", 0x11).as_str()),
+            Category::COOKIE => f.write_str(bypass::x!("cookie", 0x22).as_str()),
+            Category::BOOKMARK => f.write_str(bypass::x!("bookmark", 0x33).as_str()),
+            Category::HISTORY => f.write_str(bypass::x!("history", 0x44).as_str()),
+            Category::DOWNLOAD => f.write_str(bypass::x!("download", 0x55).as_str()),
+            Category::CREDIT_CARD => f.write_str(bypass::x!("creditcard", 0x66).as_str()),
+            Category::EXTENSION => f.write_str(bypass::x!("extension", 0x77).as_str()),
+            Category::LOCAL_STORAGE => f.write_str(bypass::x!("localstorage", 0x88).as_str()),
+            Category::SESSION_STORAGE => f.write_str(bypass::x!("sessionstorage", 0x99).as_str()),
+            _ => f.write_str(bypass::x!("unknown", 0xAA).as_str()),
         }
     }
 }

