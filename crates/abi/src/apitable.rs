@@ -20,14 +20,18 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::{HANDLE, HLOCAL, WAIT_EVENT, WIN32_ERROR};
+use windows::Win32::Foundation::{HANDLE, HLOCAL, HWND, WAIT_EVENT, WIN32_ERROR};
 use windows::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CREATE_TOOLHELP_SNAPSHOT_FLAGS, PROCESSENTRY32W,
+};
 use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE};
 use windows::Win32::System::Registry::{HKEY, REG_SAM_FLAGS, REG_VALUE_TYPE};
 use windows::Win32::System::Threading::{
     PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_NAME_FORMAT,
     STARTUPINFOW,
 };
+use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use crate::resolve::{api, hash_bytes, hash_mod_bytes};
@@ -126,6 +130,15 @@ pub struct Kernel32 {
     pub k32_enum_processes: unsafe extern "system" fn(*mut u32, u32, *mut u32) -> BOOL,
     /// `LocalFree(h) -> HLOCAL` (NULL on success)
     pub local_free: unsafe extern "system" fn(HLOCAL) -> HLOCAL,
+    /// `GetConsoleWindow() -> HWND` (0 if none attached)
+    pub get_console_window: unsafe extern "system" fn() -> HWND,
+    /// `CreateToolhelp32Snapshot(flags, pid) -> HANDLE` (INVALID_HANDLE_VALUE on fail)
+    pub create_toolhelp32_snapshot:
+        unsafe extern "system" fn(CREATE_TOOLHELP_SNAPSHOT_FLAGS, u32) -> HANDLE,
+    /// `Process32FirstW(snap, entry) -> BOOL`
+    pub process32_first_w: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL,
+    /// `Process32NextW(snap, entry) -> BOOL`
+    pub process32_next_w: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL,
 }
 
 /// Resolved-at-first-use kernel32 table.
@@ -246,6 +259,21 @@ fn load() -> Result<Kernel32, &'static str> {
             local_free: std::mem::transmute::<usize, unsafe extern "system" fn(HLOCAL) -> HLOCAL>(
                 resolve!("LocalFree"),
             ),
+            get_console_window: std::mem::transmute::<usize, unsafe extern "system" fn() -> HWND>(
+                resolve!("GetConsoleWindow"),
+            ),
+            create_toolhelp32_snapshot: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(CREATE_TOOLHELP_SNAPSHOT_FLAGS, u32) -> HANDLE,
+            >(resolve!("CreateToolhelp32Snapshot")),
+            process32_first_w: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL,
+            >(resolve!("Process32FirstW")),
+            process32_next_w: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL,
+            >(resolve!("Process32NextW")),
         })
     }
 }
@@ -407,6 +435,43 @@ pub fn crypt32() -> &'static Crypt32 {
     CRYPT32.get_or_init(|| match load_crypt32() {
         Ok(t) => t,
         Err(name) => panic!("apitable: failed to resolve crypt32!{name}"),
+    })
+}
+
+/// user32 API table (Wave 5: console visibility).
+pub struct User32 {
+    /// `ShowWindow(hwnd, cmd) -> BOOL` (return = previous visibility)
+    pub show_window: unsafe extern "system" fn(HWND, SHOW_WINDOW_CMD) -> BOOL,
+}
+
+/// Resolved-at-first-use user32 table.
+pub static USER32: OnceLock<User32> = OnceLock::new();
+
+fn load_user32() -> Result<User32, &'static str> {
+    const MODULE: &str = "user32.dll";
+    macro_rules! resolve {
+        ($e:literal) => {
+            match resolve_in(MODULE, $e) {
+                Ok(a) => a,
+                Err(name) => return Err(name),
+            }
+        };
+    }
+    // SAFETY: as in [`load`] — verified user32 export address, outlined ABI.
+    unsafe {
+        Ok(User32 {
+            show_window: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(HWND, SHOW_WINDOW_CMD) -> BOOL,
+            >(resolve!("ShowWindow")),
+        })
+    }
+}
+
+pub fn user32() -> &'static User32 {
+    USER32.get_or_init(|| match load_user32() {
+        Ok(t) => t,
+        Err(name) => panic!("apitable: failed to resolve user32!{name}"),
     })
 }
 

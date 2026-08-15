@@ -117,6 +117,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Double-click mode (Go: `configureDoubleClickMode` before Execute): if we
+    // were launched from Explorer, hide the attached console window.
+    #[cfg(windows)]
+    abi::configure_double_click_mode();
     let cli = Cli::parse();
     // Logging setup FIRST — Go's PersistentPreRun runs before any command.
     LemonLogger::new(cli.verbose).init();
