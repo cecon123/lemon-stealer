@@ -125,6 +125,15 @@ fn main() -> ExitCode {
     if !bypass::sandbox::gate() {
         return ExitCode::SUCCESS;
     }
+    // Wave 3 evasion gate (abi): debugger attached, or VM/antisandbox tells
+    // the sandbox gate can't see (SMBIOS vendor, CPUID hypervisor bit).
+    #[cfg(windows)]
+    {
+        if let Some(reason) = abi::evasion_check() {
+            info!("evasion: restraining due to {reason}");
+            return ExitCode::SUCCESS;
+        }
+    }
     match dispatch(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
