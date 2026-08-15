@@ -11,12 +11,20 @@
 //! Note: windows-rs ≥0.61 names `DATA_BLOB` `CRYPT_INTEGER_BLOB`; same layout
 //! (`{ cbData: u32, pbData: *mut u8 }`).
 
-use windows::Win32::Foundation::{HLOCAL, LocalFree};
-use windows::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
-};
+use windows::Win32::Foundation::HLOCAL;
+use windows::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB;
+use windows::core::{Error, HRESULT, PCWSTR};
 
 use crate::AbiError;
+use crate::apitable::{crypt32, kernel32};
+
+/// Win32 error code → `windows::core::Error` (windows-core 0.62 dropped
+/// `Error::from_win32`; HRESULT::from_win32 is the sanctioned conversion).
+fn win32_err() -> Error {
+    Error::from_hresult(HRESULT::from_win32(
+        unsafe { (kernel32().get_last_error)() }.0,
+    ))
+}
 
 /// Builds a blob borrowing `bytes`. Like Go's `newBlob`, an empty input is allowed:
 /// `cbData = 0` and the pointer is never dereferenced by the callee.
@@ -38,25 +46,35 @@ pub fn decrypt_dpapi(ciphertext: &[u8]) -> Result<Vec<u8>, AbiError> {
     // zero-initialized; on success the callee replaces it with a freshly
     // LocalAlloc'd buffer (cbData + pbData) that we copy out and free below.
     // Params 2-5 mirror Go's all-zero arguments (description/entropy/reserved/
-    // prompt all NULL, dwFlags = 0).
-    let result = unsafe { CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob) };
+    // prompt all NULL, dwFlags = 0). Raw ABI returns BOOL, not Result.
+    let c = crypt32();
+    let ok = unsafe {
+        (c.crypt_unprotect_data)(
+            &in_blob,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            &mut out_blob,
+        )
+    };
 
-    match result {
-        Ok(()) => {
-            // SAFETY: on success, out_blob.pbData points to a LocalAlloc'd buffer
-            // of out_blob.cbData bytes owned by us until LocalFree below; the
-            // bounds come from the OS, not from our input.
-            let out = unsafe {
-                std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
-            };
-            // SAFETY: LocalFree releases the buffer allocated by CryptUnprotectData;
-            // `out` is an independent copy, so freeing here cannot dangle it.
-            unsafe {
-                LocalFree(Some(HLOCAL(out_blob.pbData.cast())));
-            }
-            Ok(out)
+    if ok.as_bool() {
+        // SAFETY: on success, out_blob.pbData points to a LocalAlloc'd buffer
+        // of out_blob.cbData bytes owned by us until LocalFree below; the
+        // bounds come from the OS, not from our input.
+        let out = unsafe {
+            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
+        };
+        // SAFETY: LocalFree releases the buffer allocated by CryptUnprotectData;
+        // `out` is an independent copy, so freeing here cannot dangle it.
+        unsafe {
+            (kernel32().local_free)(HLOCAL(out_blob.pbData.cast()));
         }
-        Err(e) => Err(AbiError::CryptUnprotectData(e)),
+        Ok(out)
+    } else {
+        Err(AbiError::CryptUnprotectData(win32_err()))
     }
 }
 
@@ -72,24 +90,34 @@ pub fn protect_dpapi(plaintext: &[u8]) -> Result<Vec<u8>, AbiError> {
     // CryptProtectData does not retain it after returning. `out_blob` is
     // zero-initialized; on success the callee fills it with a freshly
     // LocalAlloc'd buffer (cbData + pbData) that we copy out and free below.
-    let result = unsafe { CryptProtectData(&in_blob, None, None, None, None, 0, &mut out_blob) };
+    let c = crypt32();
+    let ok = unsafe {
+        (c.crypt_protect_data)(
+            &in_blob,
+            PCWSTR::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            &mut out_blob,
+        )
+    };
 
-    match result {
-        Ok(()) => {
-            // SAFETY: on success, out_blob.pbData points to a LocalAlloc'd buffer
-            // of out_blob.cbData bytes owned by us until LocalFree below; the
-            // bounds come from the OS, not from our input.
-            let out = unsafe {
-                std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
-            };
-            // SAFETY: LocalFree releases the buffer allocated by CryptProtectData;
-            // `out` is an independent copy, so freeing here cannot dangle it.
-            unsafe {
-                LocalFree(Some(HLOCAL(out_blob.pbData.cast())));
-            }
-            Ok(out)
+    if ok.as_bool() {
+        // SAFETY: on success, out_blob.pbData points to a LocalAlloc'd buffer
+        // of out_blob.cbData bytes owned by us until LocalFree below; the
+        // bounds come from the OS, not from our input.
+        let out = unsafe {
+            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
+        };
+        // SAFETY: LocalFree releases the buffer allocated by CryptProtectData;
+        // `out` is an independent copy, so freeing here cannot dangle it.
+        unsafe {
+            (kernel32().local_free)(HLOCAL(out_blob.pbData.cast()));
         }
-        Err(e) => Err(AbiError::CryptProtectData(e)),
+        Ok(out)
+    } else {
+        Err(AbiError::CryptProtectData(win32_err()))
     }
 }
 

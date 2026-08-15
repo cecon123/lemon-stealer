@@ -10,17 +10,14 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::os::windows::ffi::OsStrExt;
 
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
-use windows::Win32::System::ProcessStatus::K32EnumProcesses;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, REG_SZ, REG_VALUE_TYPE,
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-};
+use windows::Win32::System::Threading::{PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::core::{Error, HRESULT, PCWSTR, PWSTR};
+
+use crate::apitable::{advapi32, kernel32};
 
 /// `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>` (Go: same).
 const APP_PATHS_SUBKEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\";
@@ -176,22 +173,26 @@ pub fn expand_env_string(s: &str) -> Result<String, WinpathError> {
         .chain(std::iter::once(0))
         .collect();
 
-    // SAFETY: src is NUL-terminated; None asks for the required length only.
-    let size = unsafe { ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), None) };
+    // SAFETY: src is NUL-terminated; NULL dst + size 0 asks for the required
+    // length only (raw ABI: two-call size/fill like the old wrapper).
+    let k = kernel32();
+    let size = unsafe { (k.expand_environment_strings_w)(PCWSTR(wide.as_ptr()), PWSTR::null(), 0) };
     if size == 0 {
         // SAFETY: advisory error read.
         return Err(WinpathError::ExpandEnv(win32_err(
-            unsafe { GetLastError() }.0,
+            unsafe { (k.get_last_error)() }.0,
         )));
     }
     let mut buf = vec![0u16; size as usize];
-    // SAFETY: buf is exactly size elements; the wrapper slices it to the
-    // declared capacity and the OS writes a NUL-terminated result.
-    let written = unsafe { ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), Some(&mut buf)) };
+    // SAFETY: buf is exactly size elements; the OS writes a NUL-terminated
+    // result (return value is the char count written or 0 on failure).
+    let written = unsafe {
+        (k.expand_environment_strings_w)(PCWSTR(wide.as_ptr()), PWSTR(buf.as_mut_ptr()), size)
+    };
     if written == 0 {
         // SAFETY: advisory error read.
         return Err(WinpathError::ExpandEnv(win32_err(
-            unsafe { GetLastError() }.0,
+            unsafe { (k.get_last_error)() }.0,
         )));
     }
     buf.truncate(buf.iter().position(|&c| c == 0).unwrap_or(buf.len()));
@@ -209,15 +210,9 @@ fn app_paths_lookup(exe_name: &str, root: HKEY) -> Result<String, WinpathError> 
     // SAFETY: subkey is NUL-terminated UTF-16; root is a predefined hive key;
     // KEY_QUERY_VALUE read-only. RegOpenKeyExW does not retain the strings.
     let mut hkey = HKEY(std::ptr::null_mut());
-    // RegOpen* return WIN32_ERROR directly in windows-rs 0.62 (not Result).
+    // RegOpen* return WIN32_ERROR directly (raw ABI, like the crate wrapper).
     let status = unsafe {
-        RegOpenKeyExW(
-            root,
-            PCWSTR(subkey.as_ptr()),
-            None,
-            KEY_QUERY_VALUE,
-            &mut hkey,
-        )
+        (advapi32().reg_open_key_ex_w)(root, PCWSTR(subkey.as_ptr()), 0, KEY_QUERY_VALUE, &mut hkey)
     };
     if status.0 != 0 {
         return Err(WinpathError::Registry(win32_err(status.0)));
@@ -230,13 +225,13 @@ fn app_paths_lookup(exe_name: &str, root: HKEY) -> Result<String, WinpathError> 
     // First probe gets the size with a NULL buffer; some values report it
     // directly with ERROR_SUCCESS, most with ERROR_MORE_DATA (234).
     let first = unsafe {
-        RegQueryValueExW(
+        (advapi32().reg_query_value_ex_w)(
             hkey,
             PCWSTR(name.as_ptr()),
-            None,
-            Some(&mut data_type),
-            None,
-            Some(&mut size),
+            std::ptr::null(),
+            &mut data_type,
+            std::ptr::null_mut(),
+            &mut size,
         )
     };
     if first.0 != 0 && first.0 != 234 {
@@ -249,13 +244,13 @@ fn app_paths_lookup(exe_name: &str, root: HKEY) -> Result<String, WinpathError> 
         // sized from the OS query result; the call fills bytes and updates
         // size. ERROR_MORE_DATA grows the buffer and retries.
         let r = unsafe {
-            RegQueryValueExW(
+            (advapi32().reg_query_value_ex_w)(
                 hkey,
                 PCWSTR(name.as_ptr()),
-                None,
-                Some(&mut data_type),
-                Some(value_wide.as_mut_ptr() as *mut u8),
-                Some(&mut size),
+                std::ptr::null(),
+                &mut data_type,
+                value_wide.as_mut_ptr() as *mut u8,
+                &mut size,
             )
         };
         match r.0 {
@@ -290,7 +285,7 @@ impl Drop for RegKeyGuard {
     fn drop(&mut self) {
         // SAFETY: RegCloseKey on a key we opened (failure is benign).
         unsafe {
-            let _ = RegCloseKey(self.0);
+            let _ = (advapi32().reg_close_key)(self.0);
         }
     }
 }
@@ -303,9 +298,14 @@ pub fn running_process_path(exe_name: &str) -> Option<String> {
         if pid == 0 {
             continue;
         }
-        // SAFETY: OpenProcess read-only query rights; fails silently for
-        // protected processes (Skip-Access) — mirrors Go behavior.
-        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        // SAFETY: OpenProcess read-only query rights; NULL on failure (open
+        // fails silently for protected processes (Skip-Access) — mirrors Go).
+        let h = unsafe {
+            (kernel32().open_process)(PROCESS_QUERY_LIMITED_INFORMATION, false.into(), pid)
+        };
+        if h.0.is_null() {
+            continue;
+        }
         let _guard = OwnedRawHandle(h);
         match query_full_process_image_name(h) {
             Some(path) => {
@@ -326,11 +326,13 @@ fn enum_processes() -> Result<Vec<u32>, WinpathError> {
     loop {
         let mut pids = vec![0u32; size as usize];
         let mut bytes_returned = 0u32;
-        let r = unsafe { K32EnumProcesses(pids.as_mut_ptr(), size * 4, &mut bytes_returned) };
-        if r.0 == 0 {
+        let r = unsafe {
+            (kernel32().k32_enum_processes)(pids.as_mut_ptr(), size * 4, &mut bytes_returned)
+        };
+        if !r.as_bool() {
             // SAFETY: advisory error read.
             return Err(WinpathError::EnumProcesses(win32_err(
-                unsafe { GetLastError() }.0,
+                unsafe { (kernel32().get_last_error)() }.0,
             )));
         }
         let n = (bytes_returned / 4) as usize;
@@ -351,9 +353,14 @@ fn query_full_process_image_name(h: HANDLE) -> Option<String> {
     // SAFETY: buf is MAX_PATH-ish and size describes it; PROCESS_NAME_WIN32 (0)
     // matches the Go default flag.
     let r = unsafe {
-        QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut size)
+        (kernel32().query_full_process_image_name_w)(
+            h,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
     };
-    if r.is_err() {
+    if !r.as_bool() {
         return None;
     }
     buf.truncate(size as usize);
@@ -365,7 +372,7 @@ impl Drop for OwnedRawHandle {
     fn drop(&mut self) {
         // SAFETY: CloseHandle on a handle we own.
         unsafe {
-            let _ = CloseHandle(self.0);
+            let _ = (kernel32().close_handle)(self.0);
         }
     }
 }

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 windows = { workspace = true }
+flate2 = { workspace = true }
 
 # Safety override: this crate is the ONLY place WinAPI/unsafe is allowed (PLAN R4).
 # The workspace forbids `unsafe_code`; abi re-enables it deliberately and documents

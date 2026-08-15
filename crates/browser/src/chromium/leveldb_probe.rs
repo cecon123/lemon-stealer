@@ -5,12 +5,13 @@ mod probe {
     #[test]
     fn probe_crc() {
         let block = vec![1u8, 2, 3, 4, 5, 0, 0, 0, 0, 1, 0, 0, 0];
+        let mask = |crc: u32| crc.rotate_right(15).wrapping_add(0xa282_ead8);
         for snappy in [false, true] {
             let out = ldb::compress_type(&block, snappy);
             let end = out.len() - 5;
             let stored =
                 u32::from_le_bytes([out[end + 1], out[end + 2], out[end + 3], out[end + 4]]);
-            let expect = crc32c::crc32c(&out[..end + 1]) & 0x7fff_ffff;
+            let expect = mask(crc32c::crc32c(&out[..=end]));
             assert_eq!(stored, expect, "snappy={snappy} crc mismatch");
             let ctype = out[end];
             assert_eq!(ctype, if snappy { 1 } else { 0 });

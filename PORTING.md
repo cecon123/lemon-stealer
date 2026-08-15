@@ -74,8 +74,11 @@ Khi port file nào, dùng đúng dòng trong bảng này. Nếu cần lệch, gh
 
 ```
 core ← crypto ← keyring ← browser ← cli
-abi (đáy, dùng bởi keyring/browser/filemanager)
+abi (đáy, dùng bởi keyring/browser/filemanager/telegram)
 ```
+
+> Wave 7 (`telegram`) nằm ngoài phạm vi Go parity — crate mới dựa trên `abi` (WinHTTP client,
+> sysinfo, screenshot, geo, workdir hidden). Không có file Go tương ứng; không phá bảng mapping.
 
 - `core` không depend gì (chỉ serde/chrono).
 - `crypto` pure Rust, không windows-API trực tiếp — duy nhất `decrypt_dpapi`

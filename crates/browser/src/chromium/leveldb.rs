@@ -81,7 +81,13 @@ impl LevelDb {
         for f in &tables {
             match read_table(f) {
                 Ok(mut e) => entries.append(&mut e),
-                Err(e) => return Err(e),
+                Err(e) => {
+                    log::debug!(
+                        "leveldb: table {} unreadable ({}); skipping — live trees may carry torn/corrupt tables",
+                        f.display(),
+                        e
+                    );
+                }
             }
         }
 
@@ -160,6 +166,14 @@ fn merge_entries(mut entries: Vec<Entry>) -> Vec<(Vec<u8>, Vec<u8>)> {
 // Log file reading (MANIFEST + WAL share the format)
 // ---------------------------------------------------------------------------
 
+/// LevelDB seals the on-disk CRC with `Mask(crc) = ((crc>>15)|(crc<<17)) +
+/// 0xa282ead8` (Chromium `crc32c::Mask`; the top bit is masked into bit 15/17,
+/// and the constant is added mod 2^32). Chrome's `WriteRawBlock` stores
+/// `Mask(crc32c(data+type))`; the log writer stores `Mask(crc32c(type+payload))`.
+pub(crate) fn mask_crc(raw: u32) -> u32 {
+    raw.rotate_right(15).wrapping_add(0xa282_ead8)
+}
+
 /// Reads every log record in a .log/MANIFEST file as raw byte slices.
 /// Records span FULL/FIRST/MIDDLE/LAST chunks across 32 KiB blocks.
 fn read_log_records(path: &Path) -> Result<Vec<Vec<u8>>> {
@@ -188,8 +202,12 @@ fn read_log_records(path: &Path) -> Result<Vec<Vec<u8>>> {
         let data = &bytes[off..off + len];
         off += len;
 
-        let expect = crc32c::crc32c(&bytes[off - len - 1..off]) & 0x7fff_ffff;
-        if crc != expect {
+        // Chrome/LevelDB seal the CRC with `Mask`: data (type byte + payload)
+        // → CRC-32C → `((crc>>15)|(crc<<17)) + 0xa282ead8`. Covered: type byte
+        // (the byte at `off - len - 1`) plus the `len` payload bytes.
+        let raw = crc32c::crc32c(&bytes[off - len - 1..off]);
+        let expect = mask_crc(raw);
+        if crc != expect && crc != raw & 0x7fff_ffff {
             return Err(ChromiumError::Message(format!(
                 "log {}: crc mismatch at offset {}",
                 path.display(),
@@ -461,9 +479,12 @@ fn decode_block(file: &[u8], handle: BlockHandle) -> Result<Vec<u8>> {
     let ctype = file[end];
     let stored_crc =
         u32::from_le_bytes([file[end + 1], file[end + 2], file[end + 3], file[end + 4]]);
-    let expect = crc32c::crc32c(&file[offset..end + 1]) & 0x7fff_ffff;
-    // Accept both masked and legacy-unmasked checksums (goleveldb does).
-    if stored_crc != expect && stored_crc != expect | 0x8000_0000 {
+    // Chrome/LevelDB: CRC-32C over the block payload PLUS the compression-type
+    // byte, then sealed with `mask_crc` (Chromium `WriteRawBlock` appends the
+    // trailer with the type byte, then stores Mask(crc32c(data+type))).
+    let expect = mask_crc(crc32c::crc32c(&file[offset..=end]));
+    // Accept the masked seal and the legacy unmasked form (goleveldb cross-reads).
+    if stored_crc != expect && stored_crc != crc32c::crc32c(&file[offset..=end]) & 0x7fff_ffff {
         return Err(ChromiumError::Message(format!(
             "block crc mismatch: off={offset} size={size} stored={stored_crc:#010x} expect={expect:#010x}"
         )));
@@ -669,7 +690,9 @@ pub mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(&data);
         out.push(ctype);
-        let crc = crc32c::crc32c(&out) & 0x7fff_ffff;
+        // Real Chrome/LevelDB: CRC-32C over data + type byte, sealed with Mask
+        // (`WriteRawBlock` stores Mask(crc32c(block_contents+type))).
+        let crc = mask_crc(crc32c::crc32c(&out));
         let crc_bytes = crc.to_le_bytes();
         out.extend_from_slice(&crc_bytes);
         out
@@ -758,7 +781,7 @@ pub mod tests {
             let mut header = Vec::new();
             let mut payload = vec![RECORD_FULL];
             payload.extend_from_slice(record);
-            let crc = crc32c::crc32c(&payload) & 0x7fff_ffff;
+            let crc = mask_crc(crc32c::crc32c(&payload));
             header.extend_from_slice(&crc.to_le_bytes());
             header.extend_from_slice(&(record.len() as u16).to_le_bytes());
             header.push(RECORD_FULL);

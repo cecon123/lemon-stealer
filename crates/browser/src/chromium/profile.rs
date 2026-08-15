@@ -173,10 +173,10 @@ impl Profile {
                 data.extensions = extract_extensions(path)?;
             }
             Category::LOCAL_STORAGE => {
-                data.local_storage = extract_local_storage(path)?;
+                data.local_storage = extract_local_storage(path, Some(master_keys))?;
             }
             Category::SESSION_STORAGE => {
-                data.session_storage = extract_session_storage(path)?;
+                data.session_storage = extract_session_storage(path, Some(master_keys))?;
             }
             _ => return Err(ChromiumError::Message(format!("unknown category {cat}"))),
         }

