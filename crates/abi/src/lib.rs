@@ -34,6 +34,8 @@ pub mod pe;
 #[cfg(windows)]
 pub mod resolve;
 #[cfg(windows)]
+pub mod unhook;
+#[cfg(windows)]
 pub mod winpaths;
 #[cfg(windows)]
 pub use console::{configure_double_click_mode, hide_console_window, launched_by_explorer};
@@ -51,6 +53,8 @@ pub use payload::{KEY_LEN, KEY_STATUS_READY, PAYLOAD_AMD64};
 pub use pe::{PeArch, PeError, detect_pe_arch, find_export_file_offset};
 #[cfg(windows)]
 pub use resolve::{api, hash_bytes, module_base};
+#[cfg(windows)]
+pub use unhook::{hooked_bytes, unhook_ntdll};
 #[cfg(windows)]
 pub use winpaths::{AbeKind, WinpathError, executable_path};
 

